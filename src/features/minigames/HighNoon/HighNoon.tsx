@@ -103,7 +103,7 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         if (lastBroadcast.type === 'SIGNAL_DRAW') {
             setPhase('DRAW')
             setBgColor('bg-red-700')
-            setMessage('DRAW!')
+            setMessage('🔥 FIRE! 🔥')
             drawTimeRef.current = lastBroadcast.drawTime || Date.now()
             shootEventsRef.current = []
             playDrawSignal()
@@ -118,6 +118,24 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                 }
                 return next
             })
+
+            // HOST: Set a timeout - if no one shoots in 5 seconds, it's a draw
+            if (isHost) {
+                timerRef.current = setTimeout(() => {
+                    if (gameEndedRef.current) return
+
+                    // Check if anyone has shot
+                    if (shootEventsRef.current.length === 0) {
+                        console.log('[HOST] Timeout - no shots fired, ending as draw')
+                        broadcastAndApply({
+                            type: 'GAME_RESULT',
+                            winnerId: null,
+                            isDraw: true,
+                            message: 'NOBODY FIRED! DRAW!'
+                        })
+                    }
+                }, 5000)
+            }
         }
 
         // Handle SHOOT events
@@ -203,16 +221,25 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         // Handle GAME_RESULT
         if (lastBroadcast.type === 'GAME_RESULT') {
             gameEndedRef.current = true
+            if (timerRef.current) clearTimeout(timerRef.current)
+
             const winnerId = lastBroadcast.winnerId
-            const winnerPlayer = players.find(p => p.id === winnerId)
+            const isDraw = lastBroadcast.isDraw || !winnerId
+            const winnerPlayer = winnerId ? players.find(p => p.id === winnerId) : null
 
             setWinner(winnerId)
             setPhase('ENDED')
-            setMessage(`${winnerPlayer?.username || 'Unknown'} WINS!`)
-            setBgColor(winnerId === currentPlayer?.id ? 'bg-green-700' : 'bg-gray-700')
 
-            if (winnerId === currentPlayer?.id) {
-                playWinFanfare()
+            if (isDraw) {
+                setMessage(lastBroadcast.message || '🤝 DRAW!')
+                setBgColor('bg-gray-600')
+            } else {
+                setMessage(`${winnerPlayer?.username || 'Unknown'} WINS!`)
+                setBgColor(winnerId === currentPlayer?.id ? 'bg-green-700' : 'bg-gray-700')
+
+                if (winnerId === currentPlayer?.id) {
+                    playWinFanfare()
+                }
             }
 
             // Update player states with results
@@ -234,7 +261,7 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
             // Host triggers game end
             if (isHost) {
                 setTimeout(() => {
-                    onGameEnd({ winnerId })
+                    onGameEnd({ winnerId: winnerId || undefined })
                 }, 3000)
             }
         }

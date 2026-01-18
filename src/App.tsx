@@ -1,21 +1,72 @@
-import { Suspense, useEffect } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { useGame } from './context/GameContext'
 import { CRTOverlay } from './components/layout/CRTOverlay'
 import { Lobby } from './features/lobby/Lobby'
-import { MINIGAME_REGISTRY } from './features/minigames/MinigameRegistry'
+import { MINIGAME_REGISTRY, getRandomMinigameId } from './features/minigames/MinigameRegistry'
 import { motion, AnimatePresence } from 'framer-motion'
+
+interface GameResult {
+  winnerId?: string
+  winnerName?: string
+  isDraw?: boolean
+  message?: string
+}
 
 function App() {
   const { room, minigame, players, setRoomStatus, currentPlayer, startGame } = useGame()
+  const [lastResult, setLastResult] = useState<GameResult | null>(null)
+  const [autoNextCountdown, setAutoNextCountdown] = useState(5)
 
   const handleGameEnd = async (results: { winnerId?: string }) => {
     console.log('Game Over', results)
-    // Return to lobby after showing results
+
+    const winner = results.winnerId ? players.find(p => p.id === results.winnerId) : null
+
+    setLastResult({
+      winnerId: results.winnerId,
+      winnerName: winner?.username || 'Unknown',
+      isDraw: !results.winnerId,
+      message: results.winnerId ? `${winner?.username || 'Unknown'} WINS!` : 'DRAW!'
+    })
+
+    // Move to RESULTS state
     if (currentPlayer?.is_host) {
-      setTimeout(() => {
-        setRoomStatus('LOBBY', undefined)
-      }, 4000)
+      setRoomStatus('SCOREBOARD')
     }
+  }
+
+  // Auto-countdown to next game
+  useEffect(() => {
+    if (room?.status !== 'SCOREBOARD') {
+      setAutoNextCountdown(5)
+      return
+    }
+
+    const interval = setInterval(() => {
+      setAutoNextCountdown(prev => {
+        if (prev <= 1 && currentPlayer?.is_host) {
+          // Auto start next game
+          handleNextGame()
+          return 5
+        }
+        return prev - 1
+      })
+    }, 1000)
+
+    return () => clearInterval(interval)
+  }, [room?.status, currentPlayer?.is_host])
+
+  const handleNextGame = async () => {
+    if (!currentPlayer?.is_host) return
+    const nextGameId = getRandomMinigameId()
+    if (nextGameId) {
+      setRoomStatus('INSTRUCTIONS', nextGameId)
+    }
+  }
+
+  const handleReturnToLobby = async () => {
+    if (!currentPlayer?.is_host) return
+    setRoomStatus('LOBBY', undefined)
   }
 
   // Render Minigame if active
@@ -145,9 +196,16 @@ function App() {
               </Suspense>
             )}
 
-            {/* ===== SCOREBOARD STATE ===== */}
+            {/* ===== RESULTS/SCOREBOARD STATE ===== */}
             {room.status === 'SCOREBOARD' && (
-              <ScoreboardScreen players={players} />
+              <ResultsScreen
+                players={players}
+                lastResult={lastResult}
+                countdown={autoNextCountdown}
+                isHost={currentPlayer?.is_host ?? false}
+                onNextGame={handleNextGame}
+                onReturnToLobby={handleReturnToLobby}
+              />
             )}
           </motion.div>
         )}
@@ -166,13 +224,23 @@ function InstructionsScreen({
   isHost: boolean
   onStart: () => void
 }) {
-  // Auto-start countdown for host
+  const [countdown, setCountdown] = useState(3)
+
+  // Countdown for all players
   useEffect(() => {
-    if (!isHost) return
-    const timer = setTimeout(() => {
-      onStart()
-    }, 3000) // 3 second countdown
-    return () => clearTimeout(timer)
+    const timer = setInterval(() => {
+      setCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(timer)
+          if (isHost) {
+            onStart()
+          }
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+    return () => clearInterval(timer)
   }, [isHost, onStart])
 
   return (
@@ -183,20 +251,26 @@ function InstructionsScreen({
         transition={{ type: 'spring', damping: 15 }}
         className="text-center"
       >
-        <h1 className="text-5xl md:text-8xl font-pixel text-atari-yellow mb-8"
+        <div className="text-6xl mb-4">
+          {MINIGAME_REGISTRY[minigame]?.icon || '🎮'}
+        </div>
+        <h1 className="text-4xl md:text-7xl font-pixel text-atari-yellow mb-6"
           style={{ textShadow: '0 0 30px #ffff00' }}>
           {MINIGAME_REGISTRY[minigame]?.name || 'MINIGAME'}
         </h1>
-        <p className="text-2xl md:text-4xl text-white mb-8">
+        <p className="text-xl md:text-3xl text-white mb-8 max-w-xl">
           {MINIGAME_REGISTRY[minigame]?.instructions}
         </p>
-        <motion.p
-          animate={{ opacity: [1, 0.3, 1] }}
-          transition={{ repeat: Infinity, duration: 0.5 }}
-          className="text-xl text-atari-cyan"
+
+        <motion.div
+          key={countdown}
+          initial={{ scale: 2, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          className="text-7xl font-pixel text-atari-cyan"
+          style={{ textShadow: '0 0 20px #00ffff' }}
         >
-          GET READY...
-        </motion.p>
+          {countdown > 0 ? countdown : 'GO!'}
+        </motion.div>
       </motion.div>
     </div>
   )
@@ -217,26 +291,100 @@ function LoadingScreen() {
   )
 }
 
-// ===== SCOREBOARD SCREEN =====
-function ScoreboardScreen({ players }: { players: any[] }) {
+// ===== RESULTS SCREEN =====
+function ResultsScreen({
+  players,
+  lastResult,
+  countdown,
+  isHost,
+  onNextGame,
+  onReturnToLobby
+}: {
+  players: any[]
+  lastResult: GameResult | null
+  countdown: number
+  isHost: boolean
+  onNextGame: () => void
+  onReturnToLobby: () => void
+}) {
   const sortedPlayers = [...players].sort((a, b) => b.score - a.score)
 
   return (
     <div className="flex flex-col items-center justify-center h-full p-4">
-      <h1 className="text-4xl font-pixel text-atari-yellow mb-8">SCOREBOARD</h1>
-      <ul className="space-y-4">
-        {sortedPlayers.map((p, i) => (
-          <motion.li
-            key={p.id}
-            initial={{ x: -50, opacity: 0 }}
-            animate={{ x: 0, opacity: 1 }}
-            transition={{ delay: i * 0.2 }}
-            className={`text-2xl ${i === 0 ? 'text-atari-yellow' : 'text-white'}`}
+      {/* Winner announcement */}
+      <motion.div
+        initial={{ scale: 0 }}
+        animate={{ scale: 1 }}
+        className="text-center mb-8"
+      >
+        <div className="text-6xl mb-4">🏆</div>
+        <h1 className="text-4xl md:text-6xl font-pixel text-atari-yellow mb-2"
+          style={{ textShadow: '0 0 20px #FFD700' }}>
+          {lastResult?.message || 'GAME OVER!'}
+        </h1>
+      </motion.div>
+
+      {/* Scoreboard */}
+      <div className="bg-black/50 border-2 border-atari-green rounded-lg p-6 mb-8 min-w-[300px]">
+        <h2 className="text-xl font-pixel text-atari-green mb-4 text-center">SCOREBOARD</h2>
+        <ul className="space-y-3">
+          {sortedPlayers.map((p, i) => (
+            <motion.li
+              key={p.id}
+              initial={{ x: -50, opacity: 0 }}
+              animate={{ x: 0, opacity: 1 }}
+              transition={{ delay: i * 0.15 }}
+              className={`flex justify-between items-center text-xl ${i === 0 ? 'text-atari-yellow' : 'text-white'
+                }`}
+            >
+              <span className="flex items-center gap-2">
+                <span>{i === 0 ? '👑' : `${i + 1}.`}</span>
+                <span>{p.username}</span>
+              </span>
+              <span className="font-pixel text-atari-cyan">{p.score} pts</span>
+            </motion.li>
+          ))}
+        </ul>
+      </div>
+
+      {/* Auto next game countdown */}
+      <motion.div
+        animate={{ scale: [1, 1.1, 1] }}
+        transition={{ repeat: Infinity, duration: 1 }}
+        className="text-2xl text-atari-cyan mb-4"
+      >
+        Next game in {countdown}...
+      </motion.div>
+
+      {/* Action buttons (Host only) */}
+      {isHost && (
+        <div className="flex gap-4">
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={onNextGame}
+            className="px-6 py-3 text-lg font-pixel bg-atari-green text-black rounded-lg"
+            style={{ boxShadow: '0 0 15px #39ff14' }}
           >
-            {i + 1}. {p.username} - {p.score} pts
-          </motion.li>
-        ))}
-      </ul>
+            ▶ NEXT GAME
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={onReturnToLobby}
+            className="px-6 py-3 text-lg font-pixel bg-gray-700 text-white rounded-lg border border-gray-500"
+          >
+            ← LOBBY
+          </motion.button>
+        </div>
+      )}
+
+      {!isHost && (
+        <p className="text-white/50 text-sm">
+          Waiting for host...
+        </p>
+      )}
     </div>
   )
 }
