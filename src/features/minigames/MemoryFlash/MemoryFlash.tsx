@@ -129,18 +129,40 @@ const MemoryFlash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         }
 
         if (lastBroadcast.type === 'MEMORY_PLAYER_RESULT') {
+            let nextRoundResults: Map<string, boolean> | null = null
+            let nextAlivePlayers: Set<string> | null = null
+
             setRoundResults(prev => {
                 const next = new Map(prev)
                 next.set(lastBroadcast.playerId, lastBroadcast.correct)
+                nextRoundResults = next
                 return next
             })
 
-            if (!lastBroadcast.correct) {
-                setAlivePlayers(prev => {
-                    const next = new Set(prev)
+            setAlivePlayers(prev => {
+                const next = new Set(prev)
+                if (!lastBroadcast.correct) {
                     next.delete(lastBroadcast.playerId)
-                    return next
-                })
+                }
+                nextAlivePlayers = next
+                return next
+            })
+
+            // Host checks if round should end
+            if (isHost && nextRoundResults && nextAlivePlayers) {
+                // Check if all currently alive players have a success result
+                // Or if everyone is dead
+                const allAliveFinished = [...nextAlivePlayers].every(id => nextRoundResults?.get(id) === true)
+
+                if (allAliveFinished || (nextAlivePlayers as Set<string>).size === 0) {
+                    setTimeout(() => {
+                        broadcastAndApply({
+                            type: 'MEMORY_ROUND_END',
+                            round: round,
+                            alivePlayers: [...(nextAlivePlayers || [])]
+                        })
+                    }, 500)
+                }
             }
         }
 
@@ -218,20 +240,6 @@ const MemoryFlash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                 playerId: currentPlayer.id,
                 correct: true
             })
-
-            // If host, check if all alive players have responded
-            if (isHost) {
-                setTimeout(() => {
-                    broadcastAndApply({
-                        type: 'MEMORY_ROUND_END',
-                        round,
-                        alivePlayers: [...alivePlayers].filter(id => {
-                            const result = roundResults.get(id)
-                            return result === undefined || result === true
-                        })
-                    })
-                }, 500)
-            }
         }
     }, [phase, currentPlayer, isAlive, sequence, round, alivePlayers, roundResults, isHost, broadcastAndApply])
 
