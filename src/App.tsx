@@ -2,6 +2,7 @@ import { Suspense, useEffect, useState } from 'react'
 import { useGame } from './context/GameContext'
 import { CRTOverlay } from './components/layout/CRTOverlay'
 import { Lobby } from './features/lobby/Lobby'
+import { MinigameSelector } from './features/lobby/MinigameSelector'
 import { MINIGAME_REGISTRY, getRandomMinigameId } from './features/minigames/MinigameRegistry'
 import { motion, AnimatePresence } from 'framer-motion'
 
@@ -17,6 +18,7 @@ function App() {
   const [lastResult, setLastResult] = useState<GameResult | null>(null)
   const [autoNextCountdown, setAutoNextCountdown] = useState(5)
   const [gameSessionId, setGameSessionId] = useState(0)
+  const [showGameSelector, setShowGameSelector] = useState(false)
 
   const handleGameEnd = async (results: { winnerId?: string }) => {
     console.log('Game Over', results)
@@ -151,22 +153,33 @@ function App() {
 
                 {/* Start Button (Host Only) */}
                 {currentPlayer?.is_host ? (
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => startGame()}
-                    disabled={players.length < 2}
-                    className={`
-                      px-8 py-4 text-xl font-pixel rounded-lg transition-all
-                      ${players.length >= 2
-                        ? 'bg-atari-green text-black hover:bg-atari-cyan cursor-pointer'
-                        : 'bg-gray-600 text-gray-400 cursor-not-allowed'
-                      }
-                    `}
-                    style={players.length >= 2 ? { boxShadow: '0 0 20px #39ff14' } : {}}
-                  >
-                    {players.length >= 2 ? 'START GAME' : 'NEED 2+ PLAYERS'}
-                  </motion.button>
+                  <div className="flex flex-col gap-4 w-full max-w-xs">
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => startGame()}
+                      disabled={players.length < 2}
+                      className={`
+                        w-full py-4 text-xl font-pixel rounded-lg transition-all
+                        ${players.length >= 2
+                          ? 'bg-atari-green text-black hover:bg-atari-cyan cursor-pointer'
+                          : 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                        }
+                      `}
+                      style={players.length >= 2 ? { boxShadow: '0 0 20px #39ff14' } : {}}
+                    >
+                      {players.length >= 2 ? 'START RANDOM GAME' : 'NEED 2+ PLAYERS'}
+                    </motion.button>
+
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => setShowGameSelector(true)}
+                      className="w-full py-3 text-lg font-pixel bg-gray-800 text-atari-cyan border border-atari-cyan rounded-lg hover:bg-gray-700 transition-all"
+                    >
+                      CHOOSE MINIGAME
+                    </motion.button>
+                  </div>
                 ) : (
                   <div className="text-center">
                     <p className="text-atari-yellow animate-pulse text-lg">
@@ -195,14 +208,28 @@ function App() {
 
             {/* ===== PLAYING STATE ===== */}
             {room.status === 'PLAYING' && ActiveGame && (
-              <Suspense fallback={<LoadingScreen />}>
-                <ActiveGame
-                  key={`${minigame}-${gameSessionId}`}
-                  players={players}
-                  difficulty="medium"
-                  onGameEnd={handleGameEnd}
-                />
-              </Suspense>
+              <>
+                {/* Back to Lobby Button (Host only) */}
+                {currentPlayer?.is_host && (
+                  <div className="absolute top-2 left-2 z-50">
+                    <button
+                      onClick={handleReturnToLobby}
+                      className="px-3 py-1 bg-black/50 text-white/50 text-xs hover:text-white hover:bg-red-900 border border-white/20 rounded backdrop-blur-sm transition-colors"
+                    >
+                      🏠 LOBBY
+                    </button>
+                  </div>
+                )}
+
+                <Suspense fallback={<LoadingScreen />}>
+                  <ActiveGame
+                    key={`${minigame}-${gameSessionId}`}
+                    players={players}
+                    difficulty="medium"
+                    onGameEnd={handleGameEnd}
+                  />
+                </Suspense>
+              </>
             )}
 
             {/* ===== RESULTS/SCOREBOARD STATE ===== */}
@@ -219,7 +246,21 @@ function App() {
           </motion.div>
         )}
       </AnimatePresence>
-    </div>
+
+      {/* Minigame Selector Overlay */}
+      <AnimatePresence>
+        {showGameSelector && (
+          <MinigameSelector
+            playerCount={players.length}
+            onCancel={() => setShowGameSelector(false)}
+            onSelect={(gameId) => {
+              setShowGameSelector(false)
+              startGame(gameId)
+            }}
+          />
+        )}
+      </AnimatePresence>
+    </div >
   )
 }
 

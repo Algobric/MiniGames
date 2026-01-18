@@ -6,7 +6,7 @@ import { RealtimeChannel } from '@supabase/supabase-js'
 interface GameContextType extends GameState {
     createRoom: (username: string) => Promise<string | null>
     joinRoom: (code: string, username: string) => Promise<boolean>
-    startGame: () => Promise<void>
+    startGame: (gameId?: string) => Promise<void>
     submitScore: (score: number) => Promise<void>
     setRoomStatus: (status: Room['status'], gameId?: string) => Promise<void>
     error: string | null
@@ -137,15 +137,19 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         await supabase.from('rooms').update({ status, current_game_id: gameId || room.current_game_id }).eq('id', room.id)
     }
 
-    const startGame = async () => {
+    const startGame = async (specificGameId?: string) => {
         // Logic to pick random game and set status
         if (!room) return
 
-        // Import registry and pick random game suitable for player count
-        const { getRandomMinigameForPlayers } = await import('../features/minigames/MinigameRegistry')
-        const gameId = getRandomMinigameForPlayers(players.length) || 'high-noon'
+        let gameId = specificGameId
 
-        console.log(`[GAME] Starting random minigame: ${gameId} for ${players.length} players`)
+        if (!gameId) {
+            // Import registry and pick random game suitable for player count
+            const { getRandomMinigameForPlayers } = await import('../features/minigames/MinigameRegistry')
+            gameId = getRandomMinigameForPlayers(players.length) || 'high-noon'
+        }
+
+        console.log(`[GAME] Starting minigame: ${gameId} for ${players.length} players`)
         await setRoomStatus('INSTRUCTIONS', gameId)
     }
 
