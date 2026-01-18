@@ -5,6 +5,8 @@ export interface Player {
     score: number
     is_host: boolean
     last_seen?: string
+    latency?: number        // Estimated RTT in ms
+    isSpectating?: boolean  // True if eliminated/disqualified
 }
 
 export interface Room {
@@ -25,4 +27,35 @@ export interface GameState {
     players: Player[]
     currentPlayer: Player | null
     minigame: string | null
+}
+
+// Game event types for type safety
+export type GameEventType =
+    // Timing/sync events
+    | 'TIMING_PING'
+    | 'TIMING_PONG'
+    | 'SYNCED_COUNTDOWN'
+    // HighNoon events
+    | 'SIGNAL_DRAW'
+    | 'SHOOT'
+    | 'MISFIRE'
+    | 'GAME_RESULT'
+    // ButtonMash events
+    | 'MASH_START'
+    | 'MASH_TAP'
+    | 'MASH_FINAL'
+    | 'MASH_RESULT'
+    // ColorMatch events
+    | 'COLOR_NEW_ROUND'
+    | 'COLOR_ANSWER'
+    | 'COLOR_GAME_OVER'
+    // MemoryFlash events
+    | 'MEMORY_NEW_ROUND'
+    | 'MEMORY_PLAYER_RESULT'
+    | 'MEMORY_ROUND_END'
+    | 'MEMORY_GAME_OVER'
+
+export interface GameEvent {
+    type: GameEventType
+    [key: string]: any
 }

@@ -140,8 +140,13 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const startGame = async () => {
         // Logic to pick random game and set status
         if (!room) return
-        // Placeholder: just start 'high-noon'
-        await setRoomStatus('INSTRUCTIONS', 'high-noon')
+
+        // Import registry and pick random game
+        const { getRandomMinigameId } = await import('../features/minigames/MinigameRegistry')
+        const gameId = getRandomMinigameId() || 'high-noon'
+
+        console.log(`[GAME] Starting random minigame: ${gameId}`)
+        await setRoomStatus('INSTRUCTIONS', gameId)
     }
 
     const submitScore = async (points: number) => {
