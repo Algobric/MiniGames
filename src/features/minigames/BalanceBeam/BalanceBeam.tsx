@@ -77,11 +77,29 @@ const BalanceBeam: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         return () => clearInterval(interval)
     }, [phase])
 
-    // Physics simulation (host only)
+    // Physics simulation (host only) - with random wind forces!
     useEffect(() => {
         if (phase !== 'PLAYING' || !isHost) return
 
+        // Track wind force for each player (changes periodically)
+        const windForces = new Map<string, number>(players.map(p => [p.id, 0]))
+        let windChangeTime = Date.now()
+
         const interval = setInterval(() => {
+            const now = Date.now()
+
+            // Change wind direction/strength every 1-3 seconds
+            if (now - windChangeTime > 1000 + Math.random() * 2000) {
+                windChangeTime = now
+                for (const player of players) {
+                    if (alive.has(player.id)) {
+                        // Random wind: -0.5 to 0.5 (stronger as game progresses)
+                        const intensity = Math.min(1, (GAME_DURATION - timeLeft) / GAME_DURATION + 0.3)
+                        windForces.set(player.id, (Math.random() - 0.5) * intensity)
+                    }
+                }
+            }
+
             setBallPositions(prev => {
                 const next = new Map(prev)
                 const newAlive = new Set(alive)
@@ -92,10 +110,16 @@ const BalanceBeam: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
                     const tilt = tiltAngles.get(playerId) || 0
                     let vel = velocityRef.current.get(playerId) || 0
+                    const wind = windForces.get(playerId) || 0
 
                     // Apply gravity based on tilt
                     vel += Math.sin(tilt * Math.PI / 180) * GRAVITY
-                    vel *= 0.98 // Friction
+
+                    // Apply wind force (external random force)
+                    vel += wind * 0.15
+
+                    // Apply friction
+                    vel *= 0.98
 
                     let newPos = pos + vel * 0.02
 
@@ -126,7 +150,7 @@ const BalanceBeam: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         }, 16)
 
         return () => clearInterval(interval)
-    }, [phase, isHost, alive, tiltAngles, timeLeft, broadcastAndApply])
+    }, [phase, isHost, alive, tiltAngles, timeLeft, players, broadcastAndApply])
 
     // Check timeout
     useEffect(() => {
