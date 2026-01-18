@@ -81,11 +81,13 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
             shootEventsRef.current.push(shootEvent)
 
             // If we're the host, determine winner after a short collection window
+            // NOTE: We do NOT set gameEndedRef here - only after GAME_RESULT is processed
             if (isHost && !gameEndedRef.current) {
                 // Small delay to collect any near-simultaneous shots
                 setTimeout(() => {
                     if (gameEndedRef.current) return
-                    gameEndedRef.current = true
+                    // Don't set gameEndedRef.current = true here!
+                    // It will be set when GAME_RESULT is received
 
                     // Find earliest valid shot (after DRAW time)
                     const validShots = shootEventsRef.current
