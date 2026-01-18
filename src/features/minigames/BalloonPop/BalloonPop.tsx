@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { motion } from 'framer-motion'
@@ -22,6 +22,8 @@ const BalloonPop: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [winner, setWinner] = useState<string | null>(null)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
@@ -44,12 +46,16 @@ const BalloonPop: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         if (phase !== 'PLAYING') return
         const interval = setInterval(() => {
             setTimeLeft(prev => {
-                if (prev <= 100) { clearInterval(interval); if (isHost) endGame(); return 0 }
+                if (prev <= 100) {
+                    clearInterval(interval)
+                    if (isHostRef.current) endGame()
+                    return 0
+                }
                 return prev - 100
             })
         }, 100)
         return () => clearInterval(interval)
-    }, [phase, isHost])
+    }, [phase])
 
     const endGame = useCallback(() => {
         const activePlayers = players.filter(p => !popped.has(p.id))

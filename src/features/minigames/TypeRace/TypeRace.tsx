@@ -36,6 +36,8 @@ const TypeRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     const inputRef = useRef<HTMLInputElement>(null)
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
@@ -45,12 +47,13 @@ const TypeRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) {
+                    if (isHostRef.current) {
                         const phrase = PHRASES[Math.floor(Math.random() * PHRASES.length)]
                         const now = Date.now()
                         broadcastAndApply({ type: 'TYPE_START', phrase, startTime: now })
@@ -61,8 +64,9 @@ const TypeRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost, broadcastAndApply])
+    }, [phase, broadcastAndApply])
 
     useEffect(() => {
         if (!lastBroadcast) return

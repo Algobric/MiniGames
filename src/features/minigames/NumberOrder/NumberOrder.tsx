@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { useFairTiming } from '../../../hooks/useFairTiming'
@@ -24,6 +24,8 @@ const NumberOrder: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [finishTimes, setFinishTimes] = useState<Map<string, number>>(new Map())
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
@@ -33,12 +35,13 @@ const NumberOrder: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) {
+                    if (isHostRef.current) {
                         const shuffled = [...NUMBERS].sort(() => Math.random() - 0.5)
                         const now = Date.now()
                         broadcastAndApply({ type: 'NUMBER_START', numbers: shuffled, startTime: now })
@@ -49,8 +52,9 @@ const NumberOrder: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost, broadcastAndApply])
+    }, [phase, broadcastAndApply])
 
     useEffect(() => {
         if (!lastBroadcast) return

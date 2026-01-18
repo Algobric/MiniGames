@@ -37,6 +37,7 @@ const StopWatch: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
@@ -44,16 +45,19 @@ const StopWatch: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                     playCountdownBeep(true)
                     const now = Date.now()
                     setStartTime(now)
-                    if (isHost) broadcastAndApply({ type: 'STOPWATCH_START', startTime: now })
-                    setPhase('RUNNING')
+                    setPhase('RUNNING') // All players transition
+                    if (isHost) {
+                        broadcastAndApply({ type: 'STOPWATCH_START', startTime: now })
+                    }
                     return 0
                 }
                 playCountdownBeep(false)
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost, broadcastAndApply])
+    }, [phase]) // Only depend on phase to prevent interval recreation
 
     // Hidden timer animation (for display purposes only)
     useEffect(() => {

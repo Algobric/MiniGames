@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { motion } from 'framer-motion'
@@ -27,6 +27,8 @@ const Timber: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [winner, setWinner] = useState<string | null>(null)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
@@ -36,15 +38,16 @@ const Timber: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) {
+                    if (isHostRef.current) {
                         // Generate random branches
                         const newBranches: Branch[] = []
-                        for (let i = 0; i < 50; i++) { // 50 branches total
+                        for (let i = 0; i < 50; i++) {
                             newBranches.push({
                                 side: Math.random() > 0.5 ? 'left' : 'right',
                                 y: i
@@ -58,8 +61,9 @@ const Timber: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost, broadcastAndApply])
+    }, [phase, broadcastAndApply])
 
     useEffect(() => {
         if (!lastBroadcast) return

@@ -26,6 +26,8 @@ const ReactionRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [myReactionTime, setMyReactionTime] = useState<number | null>(null)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     // Reset ref on mount
@@ -47,20 +49,22 @@ const ReactionRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     // Countdown
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) startNewRound()
+                    if (isHostRef.current) startNewRound()
                     return 0
                 }
                 playCountdownBeep(false)
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost])
+    }, [phase])
 
     const startNewRound = useCallback(() => {
         const newRound = round + 1

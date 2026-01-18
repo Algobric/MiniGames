@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { motion } from 'framer-motion'
@@ -30,6 +30,8 @@ const RockPaperScissors: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [chooseCountdown, setChooseCountdown] = useState(5)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     // Unlock audio
     useEffect(() => {
@@ -44,20 +46,22 @@ const RockPaperScissors: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     // Initial countdown
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) startNewRound()
+                    if (isHostRef.current) startNewRound()
                     return 0
                 }
                 playCountdownBeep(false)
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost])
+    }, [phase])
 
     // Choosing countdown
     useEffect(() => {

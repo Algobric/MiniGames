@@ -24,6 +24,8 @@ const InverseArrows: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [roundTimeout, setRoundTimeout] = useState(false)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
     const DIRECTIONS: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT']
@@ -44,14 +46,24 @@ const InverseArrows: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
-                if (prev <= 1) { clearInterval(interval); playCountdownBeep(true); if (isHost) startRound(); return 0 }
-                playCountdownBeep(false); return prev - 1
+                if (prev <= 1) {
+                    clearInterval(interval)
+                    playCountdownBeep(true)
+                    if (isHostRef.current) {
+                        startRound()
+                    }
+                    return 0
+                }
+                playCountdownBeep(false)
+                return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost])
+    }, [phase])
 
     const startRound = useCallback(() => {
         const newRound = round + 1

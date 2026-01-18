@@ -20,6 +20,8 @@ const PaintFloor: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [scores, setScores] = useState<Map<string, number>>(new Map())
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
     const containerRef = useRef<HTMLDivElement>(null)
     const isDrawingRef = useRef(false)
 
@@ -51,14 +53,14 @@ const PaintFloor: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
             setTimeLeft(prev => {
                 if (prev <= 100) {
                     clearInterval(interval)
-                    if (isHost) calculateWinner()
+                    if (isHostRef.current) calculateWinner()
                     return 0
                 }
                 return prev - 100
             })
         }, 100)
         return () => clearInterval(interval)
-    }, [phase, isHost])
+    }, [phase])
 
     const calculateWinner = useCallback(() => {
         const counts = new Map<string, number>()

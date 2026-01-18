@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { motion } from 'framer-motion'
@@ -25,6 +25,8 @@ const OneClickGolf: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const [isMyTurn, setIsMyTurn] = useState(false)
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
@@ -34,20 +36,24 @@ const OneClickGolf: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
                 if (prev <= 1) {
                     clearInterval(interval)
                     playCountdownBeep(true)
-                    if (isHost) broadcastAndApply({ type: 'GOLF_START', turn: 0 })
+                    if (isHostRef.current) {
+                        broadcastAndApply({ type: 'GOLF_START', turn: 0 })
+                    }
                     return 0
                 }
                 playCountdownBeep(false)
                 return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
-    }, [phase, isHost, broadcastAndApply])
+    }, [phase, broadcastAndApply])
 
     // Angle oscillation
     useEffect(() => {
