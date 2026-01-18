@@ -3,23 +3,28 @@ import type { MinigameProps } from '../../../types'
 import { useGame } from '../../../context/GameContext'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playCountdownBeep, playWinFanfare, unlockAudio } from '../HighNoon/sounds'
+import { playCountdownBeep, playWinFanfare, playTap, unlockAudio } from '../HighNoon/sounds'
 
 type Phase = 'COUNTDOWN' | 'DRAWING' | 'ENDED'
+
+const DRAW_TIME = 10000 // 10 seconds to draw
 
 const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
 
     const [phase, setPhase] = useState<Phase>('COUNTDOWN')
     const [countdown, setCountdown] = useState(3)
+    const [timeLeft, setTimeLeft] = useState(DRAW_TIME)
     const [points, setPoints] = useState<{ x: number; y: number }[]>([])
     const [isDrawing, setIsDrawing] = useState(false)
-    const [scores, setScores] = useState<Map<string, number>>(new Map())
-    const [submitted, setSubmitted] = useState<Set<string>>(new Set())
+    const [bestScore, setBestScore] = useState(0) // Track best circle this session
+    const [allScores, setAllScores] = useState<Map<string, number>>(new Map())
     const [winner, setWinner] = useState<string | null>(null)
 
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
+    const isHostRef = useRef(isHost)
+    isHostRef.current = isHost
 
     // Reset canvas on mount
     useEffect(() => {
@@ -28,6 +33,7 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
             const ctx = canvas.getContext('2d')
             if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
         }
+        setBestScore(0)
     }, [])
 
     useEffect(() => {
@@ -36,16 +42,50 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         return () => window.removeEventListener('pointerdown', handleInteraction)
     }, [])
 
+    // Countdown
     useEffect(() => {
         if (phase !== 'COUNTDOWN') return
+
         const interval = setInterval(() => {
             setCountdown(prev => {
-                if (prev <= 1) { clearInterval(interval); playCountdownBeep(true); setPhase('DRAWING'); return 0 }
-                playCountdownBeep(false); return prev - 1
+                if (prev <= 1) {
+                    clearInterval(interval)
+                    playCountdownBeep(true)
+                    setPhase('DRAWING')
+                    return 0
+                }
+                playCountdownBeep(false)
+                return prev - 1
             })
         }, 1000)
+
         return () => clearInterval(interval)
     }, [phase])
+
+    // Drawing timer
+    useEffect(() => {
+        if (phase !== 'DRAWING') return
+
+        const interval = setInterval(() => {
+            setTimeLeft(prev => {
+                if (prev <= 100) {
+                    clearInterval(interval)
+                    // Time's up! Submit final score
+                    if (currentPlayer) {
+                        broadcastAndApply({
+                            type: 'CIRCLE_SUBMIT',
+                            playerId: currentPlayer.id,
+                            score: bestScore
+                        })
+                    }
+                    return 0
+                }
+                return prev - 100
+            })
+        }, 100)
+
+        return () => clearInterval(interval)
+    }, [phase, currentPlayer, bestScore, broadcastAndApply])
 
     // Draw on canvas
     useEffect(() => {
@@ -80,6 +120,9 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         const distances = pts.map(p => Math.sqrt((p.x - centerX) ** 2 + (p.y - centerY) ** 2))
         const avgRadius = distances.reduce((sum, d) => sum + d, 0) / distances.length
 
+        // Too small circles don't count well
+        if (avgRadius < 30) return Math.max(0, Math.round(avgRadius))
+
         // Calculate variance (lower is better)
         const variance = distances.reduce((sum, d) => sum + (d - avgRadius) ** 2, 0) / distances.length
         const stdDev = Math.sqrt(variance)
@@ -95,46 +138,43 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         if (!lastBroadcast) return
 
         if (lastBroadcast.type === 'CIRCLE_SUBMIT') {
-            setScores(prev => {
+            setAllScores(prev => {
                 const next = new Map(prev)
                 next.set(lastBroadcast.playerId, lastBroadcast.score)
+
+                // Check if all submitted (everyone's time ran out)
+                if (next.size >= players.length && isHostRef.current) {
+                    setTimeout(() => {
+                        let winnerId = players[0]?.id
+                        let maxScore = -1
+                        next.forEach((score, playerId) => {
+                            if (score > maxScore) { maxScore = score; winnerId = playerId }
+                        })
+
+                        broadcastAndApply({ type: 'CIRCLE_GAME_OVER', winnerId, scores: Object.fromEntries(next) })
+                    }, 500)
+                }
                 return next
             })
-            setSubmitted(prev => new Set(prev).add(lastBroadcast.playerId))
-
-            // Check if all submitted
-            if (submitted.size + 1 >= players.length && isHost) {
-                setTimeout(() => {
-                    const allScores = new Map(scores)
-                    allScores.set(lastBroadcast.playerId, lastBroadcast.score)
-
-                    let winnerId = players[0]?.id
-                    let maxScore = -1
-                    allScores.forEach((score, playerId) => {
-                        if (score > maxScore) { maxScore = score; winnerId = playerId }
-                    })
-
-                    broadcastAndApply({ type: 'CIRCLE_GAME_OVER', winnerId, scores: Object.fromEntries(allScores) })
-                }, 500)
-            }
         }
 
         if (lastBroadcast.type === 'CIRCLE_GAME_OVER') {
-            setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-            setScores(new Map(Object.entries(lastBroadcast.scores)))
+            setPhase('ENDED')
+            setWinner(lastBroadcast.winnerId)
+            setAllScores(new Map(Object.entries(lastBroadcast.scores)))
             if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
+            if (isHostRef.current) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
         }
-    }, [lastBroadcast, players, submitted, scores, currentPlayer?.id, isHost, onGameEnd, broadcastAndApply])
+    }, [lastBroadcast, players, currentPlayer?.id, onGameEnd, broadcastAndApply])
 
     const handlePointerDown = useCallback((e: React.PointerEvent) => {
-        if (phase !== 'DRAWING' || submitted.has(currentPlayer?.id || '')) return
+        if (phase !== 'DRAWING' || timeLeft <= 0) return
         const rect = canvasRef.current?.getBoundingClientRect()
         if (!rect) return
 
         setIsDrawing(true)
         setPoints([{ x: e.clientX - rect.left, y: e.clientY - rect.top }])
-    }, [phase, currentPlayer, submitted])
+    }, [phase, timeLeft])
 
     const handlePointerMove = useCallback((e: React.PointerEvent) => {
         if (!isDrawing) return
@@ -148,18 +188,37 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
         if (!isDrawing || !currentPlayer) return
         setIsDrawing(false)
 
+        // Calculate score for this attempt
         const score = calculateCircleScore(points)
-        broadcastAndApply({ type: 'CIRCLE_SUBMIT', playerId: currentPlayer.id, score })
-    }, [isDrawing, currentPlayer, points, calculateCircleScore, broadcastAndApply])
 
-    const myScore = scores.get(currentPlayer?.id || '')
-    const hasSubmitted = submitted.has(currentPlayer?.id || '')
+        // Keep the best score
+        if (score > bestScore) {
+            setBestScore(score)
+            playTap()
+        }
+
+        // Clear canvas for next attempt
+        const canvas = canvasRef.current
+        if (canvas) {
+            const ctx = canvas.getContext('2d')
+            if (ctx) {
+                // Brief delay to show the circle before clearing
+                setTimeout(() => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height)
+                    setPoints([])
+                }, 300)
+            }
+        }
+    }, [isDrawing, currentPlayer, points, calculateCircleScore, bestScore])
 
     return (
         <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-cyan-800 to-cyan-950 select-none p-4">
             <div className="text-center pt-2">
                 <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>⭕ DIBUJA EL CÍRCULO!</h1>
-                <p className="text-lg text-cyan-300">Dibuja el círculo más perfecto</p>
+                {phase === 'DRAWING' && (
+                    <div className="text-xl text-yellow-400">{(timeLeft / 1000).toFixed(1)}s</div>
+                )}
+                <p className="text-lg text-cyan-300">¡Dibuja el círculo más perfecto!</p>
             </div>
 
             {phase === 'COUNTDOWN' && (
@@ -168,35 +227,28 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
             {phase === 'DRAWING' && (
                 <div className="flex-1 flex flex-col items-center justify-center">
+                    {/* Best score display */}
+                    <div className="mb-2 text-center">
+                        <span className="text-white/70">Tu mejor círculo: </span>
+                        <span className={clsx(
+                            "text-2xl font-pixel",
+                            bestScore >= 80 ? "text-green-400" :
+                                bestScore >= 50 ? "text-yellow-400" : "text-red-400"
+                        )}>{bestScore}%</span>
+                    </div>
+
                     <canvas
                         ref={canvasRef}
                         width={300}
                         height={300}
-                        className={clsx(
-                            "bg-white/10 rounded-lg border-2 touch-none",
-                            hasSubmitted ? "border-green-400 opacity-50" : "border-cyan-400"
-                        )}
+                        className="bg-white/10 rounded-lg border-2 border-cyan-400 touch-none"
                         onPointerDown={handlePointerDown}
                         onPointerMove={handlePointerMove}
                         onPointerUp={handlePointerUp}
                         onPointerLeave={handlePointerUp}
                     />
 
-                    {hasSubmitted && myScore !== undefined && (
-                        <motion.div
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            className="mt-4 text-center"
-                        >
-                            <div className="text-4xl font-pixel text-cyan-400">{myScore}%</div>
-                            <div className="text-white/70">Tu puntuación</div>
-                            <div className="text-sm text-white/50 mt-2">Esperando a otros jugadores...</div>
-                        </motion.div>
-                    )}
-
-                    {!hasSubmitted && (
-                        <p className="mt-4 text-white/70">Dibuja un círculo de un solo trazo</p>
-                    )}
+                    <p className="mt-4 text-white/70">¡Dibuja varios! Se guarda el mejor</p>
                 </div>
             )}
 
@@ -210,7 +262,7 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                         <div className="space-y-2">
                             {players.map(player => (
                                 <div key={player.id} className={clsx("text-xl", player.id === winner && "text-yellow-400")}>
-                                    {player.username}: {scores.get(player.id)}%
+                                    {player.username}: {allScores.get(player.id)}%
                                 </div>
                             ))}
                         </div>
