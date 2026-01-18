@@ -31,6 +31,11 @@ const MemoryFlash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
     const isAlive = currentPlayer ? alivePlayers.has(currentPlayer.id) : false
 
+    // Reset ref on mount
+    useEffect(() => {
+        inputRef.current = []
+    }, [])
+
     // Unlock audio
     useEffect(() => {
         const handleInteraction = () => {

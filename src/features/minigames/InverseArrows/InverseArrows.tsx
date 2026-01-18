@@ -30,6 +30,12 @@ const InverseArrows: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const OPPOSITE: Record<Direction, Direction> = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' }
     const ARROWS: Record<Direction, string> = { UP: '⬆️', DOWN: '⬇️', LEFT: '⬅️', RIGHT: '➡️' }
 
+    // Reset ref on mount
+    useEffect(() => {
+        if (timerRef.current) clearTimeout(timerRef.current)
+        timerRef.current = null
+    }, [])
+
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
         window.addEventListener('pointerdown', handleInteraction)

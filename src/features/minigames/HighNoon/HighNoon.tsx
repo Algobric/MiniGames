@@ -54,6 +54,14 @@ const HighNoon: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const hasShot = useRef(false)
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
 
+    // Reset refs on mount (critical for game replay)
+    useEffect(() => {
+        gameEndedRef.current = false
+        hasShot.current = false
+        shootEventsRef.current = []
+        drawTimeRef.current = 0
+    }, [])
+
     // Unlock audio on first interaction
     useEffect(() => {
         const handleInteraction = () => {

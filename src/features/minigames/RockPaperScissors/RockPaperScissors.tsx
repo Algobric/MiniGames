@@ -9,9 +9,9 @@ type Phase = 'COUNTDOWN' | 'CHOOSING' | 'REVEAL' | 'ENDED'
 type Choice = 'rock' | 'paper' | 'scissors' | null
 
 const CHOICES: { id: Choice; emoji: string; beats: Choice }[] = [
-    { id: 'rock', emoji: '🪨', beats: 'scissors' },
-    { id: 'paper', emoji: '📄', beats: 'rock' },
-    { id: 'scissors', emoji: '✂️', beats: 'paper' }
+    { id: 'rock', emoji: '✊', beats: 'scissors' },
+    { id: 'paper', emoji: '✋', beats: 'rock' },
+    { id: 'scissors', emoji: '✌️', beats: 'paper' }
 ]
 
 const TOTAL_ROUNDS = 5

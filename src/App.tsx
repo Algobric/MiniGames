@@ -16,6 +16,7 @@ function App() {
   const { room, minigame, players, setRoomStatus, currentPlayer, startGame } = useGame()
   const [lastResult, setLastResult] = useState<GameResult | null>(null)
   const [autoNextCountdown, setAutoNextCountdown] = useState(5)
+  const [gameSessionId, setGameSessionId] = useState(0)
 
   const handleGameEnd = async (results: { winnerId?: string }) => {
     console.log('Game Over', results)
@@ -34,6 +35,13 @@ function App() {
       setRoomStatus('SCOREBOARD')
     }
   }
+
+  // Increment session ID when entering PLAYING state (forces minigame component remount)
+  useEffect(() => {
+    if (room?.status === 'PLAYING') {
+      setGameSessionId(prev => prev + 1)
+    }
+  }, [room?.status])
 
   // Auto-countdown to next game
   useEffect(() => {
@@ -189,6 +197,7 @@ function App() {
             {room.status === 'PLAYING' && ActiveGame && (
               <Suspense fallback={<LoadingScreen />}>
                 <ActiveGame
+                  key={`${minigame}-${gameSessionId}`}
                   players={players}
                   difficulty="medium"
                   onGameEnd={handleGameEnd}

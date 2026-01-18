@@ -23,6 +23,11 @@ const PaintFloor: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const containerRef = useRef<HTMLDivElement>(null)
     const isDrawingRef = useRef(false)
 
+    // Reset refs on mount
+    useEffect(() => {
+        isDrawingRef.current = false
+    }, [])
+
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
         window.addEventListener('pointerdown', handleInteraction)

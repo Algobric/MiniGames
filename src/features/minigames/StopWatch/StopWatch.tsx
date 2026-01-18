@@ -24,6 +24,11 @@ const StopWatch: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
 
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
 
+    // Reset ref on mount
+    useEffect(() => {
+        displayRef.current = 0
+    }, [])
+
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
         window.addEventListener('pointerdown', handleInteraction)

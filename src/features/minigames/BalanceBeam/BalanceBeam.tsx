@@ -29,6 +29,11 @@ const BalanceBeam: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
     const velocityRef = useRef<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
 
+    // Reset ref on mount
+    useEffect(() => {
+        velocityRef.current = new Map(players.map(p => [p.id, 0]))
+    }, [players])
+
     // Unlock audio
     useEffect(() => {
         const handleInteraction = () => {

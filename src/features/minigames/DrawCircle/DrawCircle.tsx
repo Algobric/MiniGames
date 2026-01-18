@@ -21,6 +21,15 @@ const DrawCircle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const canvasRef = useRef<HTMLCanvasElement>(null)
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
 
+    // Reset canvas on mount
+    useEffect(() => {
+        const canvas = canvasRef.current
+        if (canvas) {
+            const ctx = canvas.getContext('2d')
+            if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height)
+        }
+    }, [])
+
     useEffect(() => {
         const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
         window.addEventListener('pointerdown', handleInteraction)

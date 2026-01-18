@@ -29,6 +29,14 @@ const ButtonMash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const lastBroadcastCountRef = useRef(0)
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
 
+    // Reset refs on mount (critical for game replay)
+    useEffect(() => {
+        startTimeRef.current = 0
+        myTapsRef.current = 0
+        gameEndedRef.current = false
+        lastBroadcastCountRef.current = 0
+    }, [])
+
     // Unlock audio
     useEffect(() => {
         const handleInteraction = () => {

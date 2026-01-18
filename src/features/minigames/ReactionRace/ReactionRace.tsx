@@ -28,6 +28,12 @@ const ReactionRace: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
     const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+    // Reset ref on mount
+    useEffect(() => {
+        if (timerRef.current) clearTimeout(timerRef.current)
+        timerRef.current = null
+    }, [])
+
     // Unlock audio
     useEffect(() => {
         const handleInteraction = () => {
