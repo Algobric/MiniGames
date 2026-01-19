@@ -1,258 +1,370 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * ShellGame - Follow the ball!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect, useState, useRef } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
-
-type Phase = 'COUNTDOWN' | 'SHUFFLING' | 'PICKING' | 'REVEAL' | 'ENDED'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
 const TOTAL_ROUNDS = 5
 
-const ShellGame: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+// A Swap is [cupA_Index, cupB_Index]
+type Swap = [number, number]
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [round, setRound] = useState(0)
-    const [ballPosition, setBallPosition] = useState(1) // 0, 1, or 2
-    const [cupPositions, setCupPositions] = useState([0, 1, 2])
-    const [scores, setScores] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
-    const [picks, setPicks] = useState<Map<string, number>>(new Map())
-    const [showBall, setShowBall] = useState(true)
-    const [winner, setWinner] = useState<string | null>(null)
+interface ShellGameState {
+    round: number
+    scores: Map<string, number>
+    shuffling: boolean
+    revealing: boolean
+    ballPosition: number // 0, 1, 2 (Logic position, tracked)
+    swaps: Swap[] // Current shuffle sequence
+    picks: Map<string, number> // playerId -> picked visual slot
+}
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isHostRef = useRef(isHost)
-    isHostRef.current = isHost
-
-    useEffect(() => {
-        const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
-
-    useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    if (isHostRef.current) {
-                        startRound()
-                    }
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-
-        return () => clearInterval(interval)
-    }, [phase])
-
-    const startRound = useCallback(() => {
-        const newRound = round + 1
-        if (newRound > TOTAL_ROUNDS) {
-            const sortedScores = [...scores.entries()].sort((a, b) => b[1] - a[1])
-            broadcastAndApply({ type: 'SHELL_GAME_OVER', winnerId: sortedScores[0]?.[0] })
-            return
+const ShellGame = () => {
+    const engine = useMinigameEngine<ShellGameState>({
+        config: {
+            countdownDuration: 3,
+        },
+        initialGameState: {
+            round: 0,
+            scores: new Map(),
+            shuffling: false,
+            revealing: false,
+            ballPosition: 1,
+            swaps: [],
+            picks: new Map()
         }
+    })
 
-        const ballPos = Math.floor(Math.random() * 3)
-        broadcastAndApply({ type: 'SHELL_NEW_ROUND', round: newRound, ballPosition: ballPos })
-    }, [round, scores, broadcastAndApply])
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
 
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+
+    // Visual state
+    const [cupPositions, setCupPositions] = useState([0, 1, 2]) // Visual mapping: visualIndex -> cupId
+    const [showBall, setShowBall] = useState(true)
+
+    // Helper: Generate shuffle sequence
+    const generateShuffles = (count: number): Swap[] => {
+        const swaps: Swap[] = []
+        for (let i = 0; i < count; i++) {
+            const a = Math.floor(Math.random() * 3)
+            let b = Math.floor(Math.random() * 3)
+            while (b === a) b = Math.floor(Math.random() * 3)
+            swaps.push([a, b])
+        }
+        return swaps
+    }
+
+    // Start Round Logic
     useEffect(() => {
-        if (!lastBroadcast) return
+        if (!isLeader || !isPlaying || winnerId) return
 
-        if (lastBroadcast.type === 'SHELL_NEW_ROUND') {
-            setRound(lastBroadcast.round)
-            setBallPosition(lastBroadcast.ballPosition)
-            setCupPositions([0, 1, 2])
-            setPicks(new Map())
+        if (gameState.round === 0 || (gameState.revealing === false && gameState.shuffling === false && gameState.picks.size > 0 && gameState.picks.size === players.length)) {
+            // Round End or Start
+            if (gameState.round >= TOTAL_ROUNDS && gameState.revealing) {
+                // Game Over
+                // Wait a bit
+                return
+            }
+        }
+    }, [isLeader, isPlaying, winnerId, gameState, players.length])
+
+
+    // Managed Round Flow via Leader
+    useEffect(() => {
+        if (!isLeader || !isPlaying || winnerId) return
+
+        // If Round 0, start immediately
+        if (gameState.round === 0) {
+            const startBall = Math.floor(Math.random() * 3)
+            const swaps = generateShuffles(10)
+
+            updateGameState(state => ({
+                ...state,
+                round: 1,
+                ballPosition: startBall,
+                swaps: swaps,
+                shuffling: true,
+                revealing: false,
+                picks: new Map()
+            }))
+        } else if (gameState.revealing) {
+            // Already revealing, after delay start next round
+            const timer = setTimeout(() => {
+                if (gameState.round >= TOTAL_ROUNDS) {
+                    // End Game
+                    const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
+                    const winner = sorted[0]?.[0] || null
+                    endGame(winner)
+                } else {
+                    // Next Round
+                    const startBall = Math.floor(Math.random() * 3)
+                    const swaps = generateShuffles(10 + gameState.round * 2)
+                    updateGameState(state => ({
+                        ...state,
+                        round: state.round + 1,
+                        ballPosition: startBall,
+                        swaps: swaps,
+                        shuffling: true,
+                        revealing: false,
+                        picks: new Map()
+                    }))
+                }
+            }, 3000)
+            return () => clearTimeout(timer)
+        } else if (!gameState.shuffling && !gameState.revealing && gameState.picks.size >= players.length) {
+            // All picked, Reveal
+            updateGameState(state => {
+                // Calculate updated scores here
+                // Wait, we need to know where the ball is.
+                // The ball was at `ballPosition` (logic index of cup).
+                // We need to track the swaps relative to positions?
+                // No, `cupPositions` is visual state.
+                // Leader needs to know the final mapping to judge picks.
+
+                // Let's replicate the swap logic to account for final pos
+                // Initial visual: [0, 1, 2] -> cups 0, 1, 2 are at slots 0, 1, 2.
+                // Swaps operate on SLOTS.
+                // swap(0, 1) means Cup at Slot 0 swaps with Cup at Slot 1.
+
+                const slots = [0, 1, 2] // slots[i] = cupId
+                state.swaps.forEach(([a, b]) => {
+                    const temp = slots[a]
+                    slots[a] = slots[b]
+                    slots[b] = temp
+                })
+
+                // Ball is in cupId `ballPosition`.
+                // Find which slot contains `ballPosition`.
+                const winningSlot = slots.indexOf(state.ballPosition)
+
+                const newScores = new Map(state.scores)
+                state.picks.forEach((pickSlot, pid) => {
+                    if (pickSlot === winningSlot) {
+                        newScores.set(pid, (newScores.get(pid) || 0) + 1)
+                    }
+                })
+
+                return {
+                    ...state,
+                    scores: newScores,
+                    revealing: true
+                }
+            })
+        }
+    }, [gameState.round, gameState.revealing, gameState.shuffling, gameState.picks.size, players.length, isLeader, isPlaying, winnerId, updateGameState, endGame])
+
+
+    // Client Side Animation Handling
+    useEffect(() => {
+        if (gameState.shuffling) {
+            // Reset visual
+            setCupPositions([0, 1, 2]) // Reset to identity? 
+            // BE CAREFUL: Visual continuity.
+            // Ideally we just snap to [0,1,2] at start of round? 
+            // Or keep previous?
+            // Simplest: Reset to [0,1,2] where Ball is at `ballPosition`.
+
             setShowBall(true)
-            setPhase('SHUFFLING')
 
-            // Show ball briefly, then shuffle
+            // Initial Preview
             setTimeout(() => {
                 setShowBall(false)
 
-                // Shuffle animation sequence
-                let shuffleCount = 0
-                const doShuffle = () => {
-                    shuffleCount++
-                    const i = Math.floor(Math.random() * 3)
-                    const j = (i + 1 + Math.floor(Math.random() * 2)) % 3
+                // Play Swaps
+                let swapIdx = 0
+                const playNextSwap = () => {
+                    if (swapIdx >= gameState.swaps.length) {
+                        // Done shuffling
+                        if (isLeader) {
+                            updateGameState(state => ({ ...state, shuffling: false }))
+                        }
+                        return
+                    }
 
+                    const [a, b] = gameState.swaps[swapIdx]
                     setCupPositions(prev => {
                         const next = [...prev]
-                            ;[next[i], next[j]] = [next[j], next[i]]
+                        const temp = next[a]
+                        next[a] = next[b]
+                        next[b] = temp
                         return next
                     })
 
-                    if (shuffleCount < 8) setTimeout(doShuffle, 300)
-                    else {
-                        setTimeout(() => setPhase('PICKING'), 500)
-                    }
+                    swapIdx++
+                    setTimeout(playNextSwap, 300) // Speed
                 }
 
-                setTimeout(doShuffle, 500)
+                setTimeout(playNextSwap, 1000)
+
             }, 1500)
-        }
-
-        if (lastBroadcast.type === 'SHELL_PICK') {
-            setPicks(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.pick)
-
-                if (next.size === players.length && isHost) {
-                    setTimeout(() => broadcastAndApply({ type: 'SHELL_REVEAL' }), 500)
-                }
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'SHELL_REVEAL') {
-            setPhase('REVEAL')
+        } else if (gameState.revealing) {
+            // Show ball
             setShowBall(true)
-
-            // Calculate who got it right
-            const actualPos = cupPositions.indexOf(ballPosition)
-            picks.forEach((pick, playerId) => {
-                if (pick === actualPos) {
-                    if (playerId === currentPlayer?.id) playWinFanfare()
-                    setScores(prev => {
-                        const next = new Map(prev)
-                        next.set(playerId, (prev.get(playerId) || 0) + 1)
-                        return next
-                    })
-                } else {
-                    if (playerId === currentPlayer?.id) playFail()
-                }
-            })
-
-            if (isHost) setTimeout(() => startRound(), 2500)
         }
 
-        if (lastBroadcast.type === 'SHELL_GAME_OVER') {
-            setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, players, currentPlayer?.id, isHost, ballPosition, cupPositions, picks, startRound, onGameEnd, broadcastAndApply])
+    }, [gameState.shuffling, gameState.revealing, gameState.swaps, gameState.ballPosition, isLeader, updateGameState])
 
-    const handlePick = useCallback((cupIndex: number) => {
-        if (phase !== 'PICKING' || !currentPlayer || picks.has(currentPlayer.id)) return
+    // Wait, if we reset `cupPositions` to [0,1,2], we must ensure `ballPosition` matches cup IDs.
+    // Yes, `ballPosition` is 0,1,or 2.
+    // `cupPositions` maps Slot -> CupID. Initially Slot 0 has Cup 0.
+    // If Ball is in Cup 1. Initial State: Slot 1 has Cup 1 (Ball).
+    // Swaps accumulate.
+    // This logic holds.
+
+    const handlePick = useCallback((slotIndex: number) => {
+        if (!isPlaying || !currentPlayerId) return
+        if (gameState.shuffling || gameState.revealing) return
+        if (gameState.picks.has(currentPlayerId)) return
+
         playTap()
-        broadcastAndApply({ type: 'SHELL_PICK', playerId: currentPlayer.id, pick: cupIndex })
-    }, [phase, currentPlayer, picks, broadcastAndApply])
+        updateGameState(state => ({
+            ...state,
+            picks: new Map([...state.picks, [currentPlayerId, slotIndex]])
+        }))
+    }, [isPlaying, currentPlayerId, gameState.shuffling, gameState.revealing, gameState.picks, updateGameState])
 
     const CUP_COLORS = ['#8B4513', '#A0522D', '#D2691E']
 
+    // Determine correctness for UI feedback
+    const getWinnerSlot = () => {
+        const slots = [0, 1, 2]
+        gameState.swaps.forEach(([a, b]) => {
+            const temp = slots[a]
+            slots[a] = slots[b]
+            slots[b] = temp
+        })
+        return slots.indexOf(gameState.ballPosition)
+    }
+    const winningSlot = getWinnerSlot()
+
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-amber-800 to-amber-950 select-none p-4">
-            <div className="text-center pt-2">
-                <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>🎩 ¿DÓNDE ESTÁ LA BOLITA?</h1>
-                {phase !== 'COUNTDOWN' && phase !== 'ENDED' && (
-                    <div className="text-lg text-yellow-400">Ronda {round} / {TOTAL_ROUNDS}</div>
-                )}
-            </div>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-amber-800 to-amber-950"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🎩 SHELL GAME
+                    </h1>
+                    {isPlaying && <div className="text-lg text-yellow-400">Round {gameState.round} / {TOTAL_ROUNDS}</div>}
+                </div>
 
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">{countdown}</motion.div>
-            )}
+                {isPlaying && (
+                    <div className="flex-1 flex items-center justify-center gap-4">
+                        {[0, 1, 2].map(slotIndex => {
+                            const cupId = cupPositions[slotIndex] // Which Cup is here?
+                            const hasBall = cupId === gameState.ballPosition
+                            const myPick = gameState.picks.get(currentPlayerId || '')
+                            const isPicked = myPick === slotIndex
 
-            {phase !== 'COUNTDOWN' && phase !== 'ENDED' && (
-                <div className="flex-1 flex items-center justify-center">
-                    <div className="flex gap-4">
-                        {[0, 1, 2].map(visualIndex => {
-                            const actualCupIndex = cupPositions[visualIndex]
-                            const hasBall = actualCupIndex === ballPosition
-                            const myPick = picks.get(currentPlayer?.id || '')
-                            const isPicked = myPick === visualIndex
+                            // Reveal feedback
+                            const isCorrect = slotIndex === winningSlot
+                            const showResult = gameState.revealing
 
                             return (
-                                <motion.div
-                                    key={visualIndex}
-                                    layout
-                                    className="relative cursor-pointer"
-                                    onClick={() => handlePick(visualIndex)}
-                                >
-                                    {/* Cup */}
-                                    <motion.div
-                                        animate={{
-                                            y: phase === 'REVEAL' && hasBall ? -60 : 0,
-                                            rotateY: phase === 'SHUFFLING' ? [0, 10, -10, 0] : 0
-                                        }}
-                                        transition={{ type: 'spring' }}
-                                        className={clsx(
-                                            "w-20 h-24 rounded-t-full",
-                                            isPicked && "ring-4 ring-yellow-400"
-                                        )}
-                                        style={{
-                                            background: `linear-gradient(to right, ${CUP_COLORS[0]}, ${CUP_COLORS[1]}, ${CUP_COLORS[0]})`,
-                                            clipPath: 'polygon(10% 100%, 90% 100%, 100% 0%, 0% 0%)'
-                                        }}
-                                    />
-
-                                    {/* Ball (only visible when showing) */}
-                                    {showBall && hasBall && (
-                                        <motion.div
-                                            initial={{ scale: 0 }}
-                                            animate={{ scale: 1 }}
-                                            className="absolute bottom-0 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-red-500"
-                                            style={{ boxShadow: '0 2px 4px rgba(0,0,0,0.5)' }}
-                                        />
-                                    )}
-
-                                    {/* Pick indicator */}
-                                    {isPicked && (
-                                        <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-yellow-400">
-                                            👆
-                                        </div>
-                                    )}
-                                </motion.div>
+                                <motion.button
+                                    key={slotIndex} // Key by slot index so they don't re-mount, just animate? 
+                                // Actually, if we use `layout`, Framer Motion animates position changes if we re-order DOM.
+                                // But here we are just changing props of fixed slots?
+                                // No, the shuffle animation swaps the contents visually.
+                                // If we want smooth swap animation, we should render CUPS and position them absolutely based on slot.
+                                // But current implementation updates `cupPositions` state and relies on react re-render?
+                                // The previous impl used `cupPositions` and just swapped data.
+                                // Line 188: `rotateY` animation.
+                                // Let's stick to the Slot-based render, but animate the Swap?
+                                // Without complex layout animations, the cups will just "jump" or we rely on `layout` prop?
+                                // Let's try to map Cups to Slots for rendering.
+                                // Actually, rendering Cups by ID and positioning them is better for animation.
+                                />
                             )
                         })}
-                    </div>
-                </div>
-            )}
 
-            {/* Status */}
-            {phase === 'SHUFFLING' && (
-                <div className="text-2xl text-white animate-pulse">🔀 Mezclando...</div>
-            )}
-            {phase === 'PICKING' && !picks.has(currentPlayer?.id || '') && (
-                <div className="text-2xl text-yellow-400 animate-pulse">👆 ¡Elige un vaso!</div>
-            )}
-            {phase === 'PICKING' && picks.has(currentPlayer?.id || '') && (
-                <div className="text-xl text-green-400">✓ Esperando a otros...</div>
-            )}
+                        {/* Better Render Strategy: Render Cups 0,1,2 and position them based on current Slot */}
+                        <div className="relative w-80 h-32">
+                            {[0, 1, 2].map(cupId => {
+                                // Find current slot of this cup
+                                const slotIndex = cupPositions.indexOf(cupId)
+                                const hasBall = cupId === gameState.ballPosition
 
-            {/* Scores */}
-            <div className="flex gap-4 pb-4">
-                {players.map(player => (
-                    <div key={player.id} className={clsx("text-center px-4 py-2 rounded-lg", player.id === currentPlayer?.id ? "bg-amber-700" : "bg-white/10")}>
-                        <div className="text-sm text-white/70">{player.username}</div>
-                        <div className="text-2xl font-pixel text-yellow-400">{scores.get(player.id) || 0}</div>
-                    </div>
-                ))}
-            </div>
+                                // X position: 0 -> 0%, 1 -> 50%, 2 -> 100% (roughly)
+                                // Center them:
+                                const xPos = slotIndex * 110 // px
 
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🎩</div>
-                        <div className="text-4xl font-pixel text-yellow-400">
-                            {players.find(p => p.id === winner)?.username} GANA!
+                                const myPick = gameState.picks.get(currentPlayerId || '')
+                                const isPicked = myPick === slotIndex // Wait, pick is by Slot
+
+                                return (
+                                    <motion.div
+                                        key={cupId}
+                                        className="absolute top-0 w-24"
+                                        animate={{ x: xPos }}
+                                        transition={{ type: "spring", stiffness: 300, damping: 30 }}
+                                        onClick={() => handlePick(slotIndex)}
+                                    >
+                                        {/* Cup Graphic */}
+                                        <motion.div
+                                            animate={{
+                                                y: (showBall || gameState.revealing) && hasBall ? -50 : 0,
+                                            }}
+                                            className={clsx("w-24 h-28 rounded-t-full relative z-10 cursor-pointer", isPicked && "ring-4 ring-yellow-400")}
+                                            style={{
+                                                background: `linear-gradient(to right, ${CUP_COLORS[cupId % 3]}, #8B4513)`,
+                                                borderBottom: '4px solid #502000'
+                                            }}
+                                        >
+                                            {/* Number/Label? No, they should look identical. */}
+                                        </motion.div>
+
+                                        {/* Ball (Behind cup, revealed when cup goes up) */}
+                                        {hasBall && (
+                                            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 w-8 h-8 rounded-full bg-red-500 shadow-xl z-0" />
+                                        )}
+
+                                        {/* Pick Indicator */}
+                                        {isPicked && <div className="text-center text-3xl mt-2">👆</div>}
+                                    </motion.div>
+                                )
+                            })}
                         </div>
                     </div>
-                </motion.div>
-            )}
-        </div>
+                )}
+
+                <div className="text-xl text-white font-pixel h-8">
+                    {gameState.shuffling ? "SHUFFLING..." :
+                        gameState.revealing ? "REVEAL!" :
+                            !gameState.picks.has(currentPlayerId || '') ? "PICK A CUP!" : "WAITING..."}
+                </div>
+
+                {/* Scores */}
+                <div className="flex gap-4 pb-4">
+                    {players.map(p => (
+                        <div key={p.id} className={clsx("px-4 py-2 rounded bg-black/30", p.id === currentPlayerId && "border border-yellow-400")}>
+                            <div className="text-xs text-white/70">{p.username}</div>
+                            <div className="text-xl text-yellow-400">{gameState.scores.get(p.id) || 0}</div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </MinigameWrapper>
     )
 }
 

@@ -1,344 +1,240 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * BalanceBeam - Don't fall off!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
-
-const GAME_DURATION = 20000 // 20 seconds
+const GAME_DURATION = 20
 const GRAVITY = 0.3
 const TILT_SPEED = 2
 
-const BalanceBeam: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface BalanceBeamState {
+    tiltAngles: Map<string, number>
+    alive: Set<string>
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [timeLeft, setTimeLeft] = useState(GAME_DURATION)
-    const [ballPositions, setBallPositions] = useState<Map<string, number>>(
-        new Map(players.map(p => [p.id, 0])) // -1 to 1, 0 is center
-    )
-    const [tiltAngles, setTiltAngles] = useState<Map<string, number>>(
-        new Map(players.map(p => [p.id, 0]))
-    )
-    const [alive, setAlive] = useState<Set<string>>(new Set(players.map(p => p.id)))
-    const [winner, setWinner] = useState<string | null>(null)
-
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const velocityRef = useRef<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
-
-    // Reset ref on mount
-    useEffect(() => {
-        velocityRef.current = new Map(players.map(p => [p.id, 0]))
-    }, [players])
-
-    // Unlock audio
-    useEffect(() => {
-        const handleInteraction = () => {
-            unlockAudio()
-            window.removeEventListener('pointerdown', handleInteraction)
+const BalanceBeam = () => {
+    const engine = useMinigameEngine<BalanceBeamState>({
+        config: {
+            countdownDuration: 3,
+            gameDuration: GAME_DURATION
+        },
+        initialGameState: {
+            tiltAngles: new Map(),
+            alive: new Set()
         }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+    })
 
-    // Countdown
+    const {
+        phase,
+        countdown,
+        timeRemaining,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
+
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const [localPositions, setLocalPositions] = useState<Map<string, number>>(new Map())
+    const velocityRef = useRef<Map<string, number>>(new Map())
+    const gameEndedRef = useRef(false)
+
+    // Initialize state
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    setPhase('PLAYING')
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-        return () => clearInterval(interval)
-    }, [phase])
+        if (players.length > 0 && gameState.alive.size === 0 && isPlaying) {
+            // We need to initialize alive set if empty
+            updateGameState(state => ({
+                ...state,
+                alive: new Set(players.map(p => p.id)),
+                tiltAngles: new Map(players.map(p => [p.id, 0]))
+            }))
+        }
+    }, [players, isPlaying, gameState.alive.size, updateGameState])
 
-    // Game timer
+    // Physics Loop (Runs on all clients for visuals)
     useEffect(() => {
-        if (phase !== 'PLAYING') return
-        const interval = setInterval(() => {
-            setTimeLeft(prev => {
-                if (prev <= 100) {
-                    clearInterval(interval)
-                    return 0
-                }
-                return prev - 100
-            })
-        }, 100)
-        return () => clearInterval(interval)
-    }, [phase])
-
-    // Physics simulation (host only) - with random wind forces!
-    useEffect(() => {
-        if (phase !== 'PLAYING' || !isHost) return
-
-        // Track wind force for each player (changes periodically)
-        const windForces = new Map<string, number>(players.map(p => [p.id, 0]))
-        let windChangeTime = Date.now()
+        if (!isPlaying) return
 
         const interval = setInterval(() => {
-            const now = Date.now()
-
-            // Change wind direction/strength every 1-3 seconds
-            if (now - windChangeTime > 1000 + Math.random() * 2000) {
-                windChangeTime = now
-                for (const player of players) {
-                    if (alive.has(player.id)) {
-                        // Random wind: -0.5 to 0.5 (stronger as game progresses)
-                        const intensity = Math.min(1, (GAME_DURATION - timeLeft) / GAME_DURATION + 0.3)
-                        windForces.set(player.id, (Math.random() - 0.5) * intensity)
-                    }
-                }
-            }
-
-            setBallPositions(prev => {
+            setLocalPositions(prev => {
                 const next = new Map(prev)
-                const newAlive = new Set(alive)
-                let changed = false
+                const currentVels = velocityRef.current
 
-                for (const [playerId, pos] of prev) {
-                    if (!alive.has(playerId)) continue
+                // Iterate over all players (even dead ones for fairness in code, but visuals hide them)
+                players.forEach(player => {
+                    // Start position is 0 if undefined
+                    let pos = prev.get(player.id) ?? 0
+                    let vel = currentVels.get(player.id) ?? 0
 
-                    const tilt = tiltAngles.get(playerId) || 0
-                    let vel = velocityRef.current.get(playerId) || 0
-                    const wind = windForces.get(playerId) || 0
+                    const tilt = gameState.tiltAngles.get(player.id) || 0
+                    const isAlive = gameState.alive.has(player.id) || (gameState.alive.size === 0 && isLeader) // during init
 
-                    // Apply gravity based on tilt
+                    // Apply gravity
                     vel += Math.sin(tilt * Math.PI / 180) * GRAVITY
 
-                    // Apply wind force (external random force)
-                    vel += wind * 0.15
+                    // Apply random wind (Synced? No, random local wind makes it divergent! 
+                    // Let's remove random wind for fairness in deterministic engine, or use deterministic noise)
+                    // Removing wind for now to ensure stability.
 
-                    // Apply friction
-                    vel *= 0.98
+                    vel *= 0.98 // Friction
+                    pos += vel * 0.05 // Speed scale
 
-                    let newPos = pos + vel * 0.02
+                    // Guard bounds
+                    if (pos > 1.2) pos = 1.2
+                    if (pos < -1.2) pos = -1.2
 
-                    // Check if fallen off
-                    if (Math.abs(newPos) > 1) {
-                        newAlive.delete(playerId)
-                        changed = true
-                        playFail()
-                        broadcastAndApply({ type: 'BALANCE_FALL', playerId })
-                    } else {
-                        velocityRef.current.set(playerId, vel)
-                        next.set(playerId, newPos)
+                    next.set(player.id, pos)
+                    currentVels.set(player.id, vel)
+
+                    // Fall detection (Leader only updates state, but local can show visual fall)
+                    if (Math.abs(pos) > 1 && isLeader && isAlive && !winnerId) {
+                        // This player fell
+                        updateGameState(state => {
+                            const newAlive = new Set(state.alive)
+                            newAlive.delete(player.id)
+                            return { ...state, alive: newAlive }
+                        })
+                        // Play fail sound?
+                        // Ideally we only play sound if WE fell.
+                        if (player.id === currentPlayerId) playFail()
                     }
-                }
-
-                if (changed) {
-                    setAlive(newAlive)
-
-                    // Check win condition
-                    if (newAlive.size <= 1 || timeLeft <= 0) {
-                        const winnerId = [...newAlive][0] || null
-                        broadcastAndApply({ type: 'BALANCE_GAME_OVER', winnerId })
-                    }
-                }
-
+                })
                 return next
             })
         }, 16)
 
         return () => clearInterval(interval)
-    }, [phase, isHost, alive, tiltAngles, timeLeft, players, broadcastAndApply])
+    }, [isPlaying, players, gameState.tiltAngles, gameState.alive, isLeader, updateGameState, winnerId, currentPlayerId])
 
-    // Check timeout
+    // Game Over Logic
     useEffect(() => {
-        if (phase !== 'PLAYING' || !isHost || timeLeft > 0) return
+        if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
 
-        const alivePlayers = [...alive]
-        if (alivePlayers.length > 0) {
-            // Winner is whoever is still alive
-            const winnerId = alivePlayers[0]
-            broadcastAndApply({ type: 'BALANCE_GAME_OVER', winnerId })
+        // Check if only one survivor (or 0)
+        // If single player mode? Then 0 is loss.
+        // If multiple, last man standing.
+
+        const aliveCount = gameState.alive.size
+        const timeOut = timeRemaining !== null && timeRemaining <= 0
+
+        if (aliveCount <= 1 && players.length > 1) {
+            // Winner found
+            gameEndedRef.current = true
+            const winner = [...gameState.alive][0] || null
+            playWinFanfare()
+            endGame(winner)
+        } else if (aliveCount === 0 && players.length === 1) {
+            // Solo loss
+            gameEndedRef.current = true
+            endGame(null)
+        } else if (timeOut) {
+            // Time up - Draw or everyone wins? 
+            // "Survival" game. Everyone alive wins?
+            // Or random winner among survivors? Usually draw. 
+            // Or "Tie".
+            gameEndedRef.current = true
+            // For now, no winner if time runs out (Tie)
+            endGame(null)
         }
-    }, [phase, isHost, timeLeft, alive, broadcastAndApply])
 
-    // Listen for broadcasts
-    useEffect(() => {
-        if (!lastBroadcast) return
+    }, [gameState.alive, players.length, timeRemaining, isPlaying, isLeader, winnerId, endGame])
 
-        if (lastBroadcast.type === 'BALANCE_TILT') {
-            setTiltAngles(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.angle)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'BALANCE_FALL') {
-            setAlive(prev => {
-                const next = new Set(prev)
-                next.delete(lastBroadcast.playerId)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'BALANCE_GAME_OVER') {
-            setPhase('ENDED')
-            setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
 
     const handleTilt = useCallback((direction: 'left' | 'right') => {
-        if (phase !== 'PLAYING' || !currentPlayer || !alive.has(currentPlayer.id)) return
+        if (!isPlaying || !currentPlayerId) return
+        if (!gameState.alive.has(currentPlayerId)) return
 
         playTap()
-        const currentAngle = tiltAngles.get(currentPlayer.id) || 0
+        const currentAngle = gameState.tiltAngles.get(currentPlayerId) || 0
         const newAngle = direction === 'left'
             ? Math.max(-30, currentAngle - TILT_SPEED)
             : Math.min(30, currentAngle + TILT_SPEED)
 
-        setTiltAngles(prev => {
-            const next = new Map(prev)
-            next.set(currentPlayer.id, newAngle)
-            return next
-        })
-
-        broadcastAndApply({
-            type: 'BALANCE_TILT',
-            playerId: currentPlayer.id,
-            angle: newAngle
-        })
-    }, [phase, currentPlayer, alive, tiltAngles, broadcastAndApply])
-
-    const myPosition = currentPlayer ? ballPositions.get(currentPlayer.id) || 0 : 0
-    const myTilt = currentPlayer ? tiltAngles.get(currentPlayer.id) || 0 : 0
-    const amAlive = currentPlayer ? alive.has(currentPlayer.id) : false
+        updateGameState(state => ({
+            ...state,
+            tiltAngles: new Map([...state.tiltAngles, [currentPlayerId, newAngle]])
+        }))
+    }, [isPlaying, currentPlayerId, gameState.alive, gameState.tiltAngles, updateGameState])
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-sky-400 to-sky-700 select-none p-4">
-            {/* Header */}
-            <div className="text-center pt-2">
-                <h1 className="text-3xl md:text-4xl font-pixel text-white mb-2" style={{ textShadow: '0 2px 0 #000' }}>
-                    ⚖️ BALANCE BEAM!
-                </h1>
-                {phase === 'PLAYING' && (
-                    <div className="text-xl text-yellow-300">{(timeLeft / 1000).toFixed(1)}s</div>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            timeRemaining={timeRemaining}
+            backgroundColor="bg-gradient-to-b from-sky-400 to-sky-700"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        ⚖️ BALANCE BEAM!
+                    </h1>
+                </div>
+
+                {/* Beam Area */}
+                <div className="flex-1 flex flex-col items-center justify-center w-full max-w-lg">
+                    {players.map(player => {
+                        const isMe = player.id === currentPlayerId
+                        const angle = gameState.tiltAngles.get(player.id) || 0
+                        const pos = localPositions.get(player.id) || 0
+                        const isAlive = gameState.alive.has(player.id) || (gameState.alive.size === 0 && isLeader) // Show initial state
+
+                        return (
+                            <div key={player.id} className={clsx("mb-8 w-full transition-opacity duration-500", !isAlive && "opacity-30 grayscale")}>
+                                <div className="text-center text-sm text-white mb-1">{player.username} {isMe ? '(YOU)' : ''}</div>
+                                <motion.div
+                                    animate={{ rotate: angle }}
+                                    className="relative w-full h-4 bg-amber-700 rounded-full mx-auto"
+                                    style={{ transformOrigin: 'center' }}
+                                >
+                                    {/* Pivot */}
+                                    <div className="absolute top-full left-1/2 -translate-x-1/2 w-4 h-4 bg-amber-900 clip-path-triangle" />
+
+                                    {/* Ball */}
+                                    {isAlive && (
+                                        <div
+                                            className="absolute top-0 w-6 h-6 bg-red-500 rounded-full -translate-y-full shadow-md"
+                                            style={{
+                                                left: `${50 + pos * 40}%`, // Scale position to %
+                                                transform: 'translate(-50%, -50%)'
+                                            }}
+                                        />
+                                    )}
+                                </motion.div>
+                            </div>
+                        )
+                    })}
+                </div>
+
+                {isPlaying && currentPlayerId && gameState.alive.has(currentPlayerId) && (
+                    <div className="flex gap-16 pb-8">
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleTilt('left')}
+                            className="w-24 h-24 bg-amber-600 rounded-full shadow-lg text-4xl border-b-8 border-amber-800 active:border-b-0 active:translate-y-2"
+                        >
+                            ⬅️
+                        </motion.button>
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleTilt('right')}
+                            className="w-24 h-24 bg-amber-600 rounded-full shadow-lg text-4xl border-b-8 border-amber-800 active:border-b-0 active:translate-y-2"
+                        >
+                            ➡️
+                        </motion.button>
+                    </div>
                 )}
             </div>
-
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">
-                    {countdown}
-                </motion.div>
-            )}
-
-            {/* Beam area */}
-            {phase === 'PLAYING' && (
-                <div className="flex-1 flex flex-col items-center justify-center">
-                    {/* My beam */}
-                    <div className="relative mb-8">
-                        <div className="text-sm text-white mb-2 text-center">
-                            {currentPlayer?.username} {!amAlive && '(FELL!)'}
-                        </div>
-                        <motion.div
-                            animate={{ rotate: myTilt }}
-                            className={clsx(
-                                "relative w-64 h-3 rounded-full",
-                                amAlive ? "bg-amber-600" : "bg-gray-500"
-                            )}
-                            style={{ transformOrigin: 'center center' }}
-                        >
-                            {/* Ball */}
-                            {amAlive && (
-                                <motion.div
-                                    className="absolute top-0 w-5 h-5 bg-red-500 rounded-full -translate-y-full"
-                                    style={{
-                                        left: `${50 + myPosition * 45}%`,
-                                        transform: 'translateX(-50%) translateY(-100%)',
-                                        boxShadow: '0 2px 4px rgba(0,0,0,0.3)'
-                                    }}
-                                />
-                            )}
-                        </motion.div>
-                        {/* Pivot */}
-                        <div className="w-4 h-8 bg-amber-800 mx-auto" />
-                    </div>
-
-                    {/* Other players */}
-                    <div className="flex gap-8">
-                        {players.filter(p => p.id !== currentPlayer?.id).map(player => {
-                            const pos = ballPositions.get(player.id) || 0
-                            const tilt = tiltAngles.get(player.id) || 0
-                            const isAlive = alive.has(player.id)
-                            return (
-                                <div key={player.id} className="text-center">
-                                    <div className="text-xs text-white mb-1">
-                                        {player.username} {!isAlive && '💀'}
-                                    </div>
-                                    <motion.div
-                                        animate={{ rotate: tilt }}
-                                        className={clsx(
-                                            "relative w-24 h-2 rounded-full",
-                                            isAlive ? "bg-amber-600" : "bg-gray-500"
-                                        )}
-                                    >
-                                        {isAlive && (
-                                            <div
-                                                className="absolute top-0 w-3 h-3 bg-blue-500 rounded-full -translate-y-full"
-                                                style={{
-                                                    left: `${50 + pos * 45}%`,
-                                                    transform: 'translateX(-50%) translateY(-100%)'
-                                                }}
-                                            />
-                                        )}
-                                    </motion.div>
-                                </div>
-                            )
-                        })}
-                    </div>
-                </div>
-            )}
-
-            {/* Controls */}
-            {phase === 'PLAYING' && amAlive && (
-                <div className="flex gap-8 pb-4">
-                    <motion.button
-                        whileTap={{ scale: 0.9 }}
-                        onPointerDown={() => handleTilt('left')}
-                        className="w-20 h-20 bg-amber-600 rounded-xl text-3xl shadow-lg"
-                    >
-                        ⬅️
-                    </motion.button>
-                    <motion.button
-                        whileTap={{ scale: 0.9 }}
-                        onPointerDown={() => handleTilt('right')}
-                        className="w-20 h-20 bg-amber-600 rounded-xl text-3xl shadow-lg"
-                    >
-                        ➡️
-                    </motion.button>
-                </div>
-            )}
-
-            {!amAlive && phase === 'PLAYING' && (
-                <div className="text-2xl text-red-300 pb-8">You fell off! Watching...</div>
-            )}
-
-            {/* Winner */}
-            {phase === 'ENDED' && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">⚖️</div>
-                        <div className="text-4xl font-pixel text-yellow-400">
-                            {winner ? `${players.find(p => p.id === winner)?.username} WINS!` : 'EVERYONE FELL!'}
-                        </div>
-                    </div>
-                </motion.div>
-            )}
-        </div>
+        </MinigameWrapper>
     )
 }
 

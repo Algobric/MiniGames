@@ -1,231 +1,229 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * Timber - Chop fast, don't get hit!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
-type Side = 'left' | 'right'
+type Side = 'LEFT' | 'RIGHT'
 
-// Each tree has branches on alternating sides
-interface Branch {
-    side: Side
-    y: number
+interface TimberState {
+    branches: Side[] // 0 is bottom, N is top
+    players: Map<string, {
+        progress: number
+        side: Side
+        alive: boolean
+    }>
 }
 
+const Timber = () => {
+    const engine = useMinigameEngine<TimberState>({
+        config: {
+            countdownDuration: 3,
+        },
+        initialGameState: {
+            branches: [],
+            players: new Map()
+        }
+    })
 
-const Timber: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [branches, setBranches] = useState<Branch[]>([])
-    const [progress, setProgress] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
-    const [playerSides, setPlayerSides] = useState<Map<string, Side>>(new Map(players.map(p => [p.id, 'left'])))
-    const [eliminated, setEliminated] = useState<Set<string>>(new Set())
-    const [winner, setWinner] = useState<string | null>(null)
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const GOAL = 50
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isHostRef = useRef(isHost)
-    isHostRef.current = isHost
-
+    // Init Level
     useEffect(() => {
-        const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+        if (players.length > 0 && gameState.branches.length === 0 && isPlaying) {
+            const newBranches: Side[] = []
+            for (let i = 0; i < GOAL + 10; i++) newBranches.push(Math.random() > 0.5 ? 'LEFT' : 'RIGHT')
 
+            const newPlayers = new Map()
+            players.forEach(p => newPlayers.set(p.id, { progress: 0, side: 'LEFT', alive: true }))
+
+            updateGameState(state => ({
+                ...state,
+                branches: newBranches,
+                players: newPlayers
+            }))
+        }
+    }, [players, isPlaying, gameState.branches.length, updateGameState])
+
+    // Game End Check
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
+        if (!isPlaying || !isLeader || winnerId) return
 
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    if (isHostRef.current) {
-                        // Generate random branches
-                        const newBranches: Branch[] = []
-                        for (let i = 0; i < 50; i++) {
-                            newBranches.push({
-                                side: Math.random() > 0.5 ? 'left' : 'right',
-                                y: i
-                            })
-                        }
-                        broadcastAndApply({ type: 'TIMBER_START', branches: newBranches })
-                    }
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
+        let allDead = true
+        let winner = null
 
-        return () => clearInterval(interval)
-    }, [phase, broadcastAndApply])
-
-    useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'TIMBER_START') {
-            setBranches(lastBroadcast.branches)
-            setPhase('PLAYING')
+        for (const [pid, p] of gameState.players) {
+            if (p.alive) allDead = false
+            if (p.progress >= GOAL && p.alive) {
+                winner = pid
+                break
+            }
         }
 
-        if (lastBroadcast.type === 'TIMBER_CHOP') {
-            setProgress(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.progress)
-                return next
-            })
-            setPlayerSides(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.side)
-                return next
-            })
+        if (winner) {
+            if (winner === currentPlayerId) playWinFanfare()
+            endGame(winner)
+        } else if (allDead && players.length > 0) {
+            // Everyone died? No winner? Or last to die?
+            // Simplest: No winner.
+            endGame(null)
         }
 
-        if (lastBroadcast.type === 'TIMBER_HIT') {
-            setEliminated(prev => new Set(prev).add(lastBroadcast.playerId))
-            if (lastBroadcast.playerId === currentPlayer?.id) playFail()
-        }
+    }, [gameState.players, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
 
-        if (lastBroadcast.type === 'TIMBER_GAME_OVER') {
-            setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
 
     const handleChop = useCallback((side: Side) => {
-        if (phase !== 'PLAYING' || !currentPlayer || eliminated.has(currentPlayer.id)) return
+        if (!isPlaying || !currentPlayerId) return
 
-        const currentProgress = progress.get(currentPlayer.id) || 0
-        const nextBranch = branches[currentProgress]
+        // Optimistic check?
+        // Need to check if branch kills me
+        // Current Branch to check is at `progress + 1`?
+        // Visually: Player is at bottom. Branches fall down.
+        // `branches[0]` is the one right above head? 
+        // No, `branches` is the static tree. `progress` is how many we chopped.
+        // If I chop, I remove bottom branch?
+        // Logically: `branches` is array of size 50.
+        // `progress` = 0. Next branch is `branches[0]`.
+        // If I move to Side X and Chop.
+        // If `branches[0]` is on Side X, I die?
+        // Usually Tree falls down. So if I am on Left, and branch is on Left, I die.
+        // BUT, the branch that kills you is the one coming DOWN.
+        // So at `progress=0`, I see `branches[0]` just above me?
+        // Let's say: `branches[i]` is the branch at height `i`.
+        // When I am at `progress=0`, I am safe. I chop.
+        // Tree falls. `branches[0]` is now at my feet (gone).
+        // `branches[1]` falls to my head level.
+        // So I must NOT be on the side of `branches[1]`.
+        // Wait, if I chop `branches[0]`, `branches[1]` falls.
+        // So BEFORE I chop, I must ensure `branches[1]` is not on my side?
+        // Actually, classic Timberman: You chop. If there is a branch on your side at the current level, you die.
 
-        // Check if we hit a branch
-        if (nextBranch && nextBranch.side === side) {
-            // Hit! Player is eliminated
-            broadcastAndApply({ type: 'TIMBER_HIT', playerId: currentPlayer.id })
-            return
-        }
+        updateGameState(state => {
+            const p = state.players.get(currentPlayerId)
+            if (!p || !p.alive) return state
+            const currentBranch = state.branches[p.progress]
 
-        playTap()
-        const newProgress = currentProgress + 1
-        broadcastAndApply({ type: 'TIMBER_CHOP', playerId: currentPlayer.id, progress: newProgress, side })
+            // Check death collision
+            if (currentBranch === side) {
+                // Die
+                playFail()
+                const nextPlayers = new Map(state.players)
+                nextPlayers.set(currentPlayerId, { ...p, side, alive: false })
+                return { ...state, players: nextPlayers }
+            }
 
-        // Check win condition
-        if (newProgress >= branches.length && isHost) {
-            broadcastAndApply({ type: 'TIMBER_GAME_OVER', winnerId: currentPlayer.id })
-        }
-    }, [phase, currentPlayer, eliminated, progress, branches, isHost, broadcastAndApply])
+            // Chop success
+            playTap()
+            const nextPlayers = new Map(state.players)
+            nextPlayers.set(currentPlayerId, { ...p, side, progress: p.progress + 1 })
+            return { ...state, players: nextPlayers }
+        })
 
-    const myProgress = progress.get(currentPlayer?.id || '') || 0
-    const mySide = playerSides.get(currentPlayer?.id || '') || 'left'
-    const amEliminated = eliminated.has(currentPlayer?.id || '')
+    }, [isPlaying, currentPlayerId, updateGameState])
 
-    // Get visible branches for the player (next 5)
-    const visibleBranches = branches.slice(myProgress, myProgress + 5)
+    const myState = gameState.players.get(currentPlayerId || '')
+    const myProgress = myState?.progress || 0
+    // Visible branches: slice from myProgress
+    const visibleBranches = gameState.branches.slice(myProgress, myProgress + 6)
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-green-700 to-green-900 select-none p-4">
-            <div className="text-center pt-2">
-                <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>🪓 TALAR EL ÁRBOL!</h1>
-                <p className="text-lg text-green-300">Esquiva las ramas cambiando de lado</p>
-            </div>
-
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">{countdown}</motion.div>
-            )}
-
-            {phase !== 'COUNTDOWN' && (
-                <div className="flex-1 flex items-center justify-center">
-                    {/* Tree */}
-                    <div className="relative">
-                        {/* Tree trunk */}
-                        <div className="w-16 h-64 bg-amber-800 rounded-t-lg relative">
-                            {/* Branches coming down */}
-                            {visibleBranches.map((branch, i) => (
-                                <motion.div
-                                    key={myProgress + i}
-                                    initial={{ y: -50 }}
-                                    animate={{ y: 0 }}
-                                    className={clsx(
-                                        "absolute w-12 h-4 bg-amber-700",
-                                        branch.side === 'left' ? "-left-10" : "-right-10 right-0"
-                                    )}
-                                    style={{ top: i * 40 + 20 }}
-                                />
-                            ))}
-
-                            {/* Lumberjack */}
-                            {!amEliminated && (
-                                <motion.div
-                                    animate={{ x: mySide === 'left' ? -30 : 30 }}
-                                    className="absolute bottom-0 left-1/2 -translate-x-1/2 text-4xl"
-                                >
-                                    🪓
-                                </motion.div>
-                            )}
-                            {amEliminated && (
-                                <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-4xl">💀</div>
-                            )}
-                        </div>
-                    </div>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-sky-400 to-green-600"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🪓 TIMBER!
+                    </h1>
                 </div>
-            )}
 
-            {/* Progress bars */}
-            {phase === 'PLAYING' && (
-                <div className="w-full max-w-md mb-4">
-                    {players.map(player => {
-                        const prog = progress.get(player.id) || 0
-                        const isElim = eliminated.has(player.id)
+                {/* Game View */}
+                <div className="flex-1 flex flex-col items-center justify-end pb-8 relative w-full overflow-hidden">
+                    {/* Tree Trunk */}
+                    <div className="w-24 bg-amber-800 h-full relative flex flex-col-reverse justify-start">
+                        {visibleBranches.map((side, i) => (
+                            <motion.div
+                                key={myProgress + i}
+                                initial={{ y: -50, opacity: 0 }}
+                                animate={{ y: 0, opacity: 1 }}
+                                className="w-full h-24 border-b border-black/10 relative"
+                            >
+                                {/* Branch */}
+                                <div
+                                    className={clsx("absolute w-24 h-8 bg-green-800 top-8", side === 'LEFT' ? "-left-20 rounded-l-full" : "-right-20 rounded-r-full")}
+                                />
+                            </motion.div>
+                        ))}
+                    </div>
 
+                    {/* Player */}
+                    {myState && (
+                        <motion.div
+                            animate={{ x: myState.side === 'LEFT' ? -80 : 80 }}
+                            className="absolute bottom-24 text-6xl"
+                        >
+                            {myState.alive ? '👷' : '🪦'}
+                        </motion.div>
+                    )}
+                </div>
+
+                {/* Progress */}
+                <div className="absolute top-20 right-4 bg-black/30 p-2 rounded text-white">
+                    {/* Leaderboard small */}
+                    {Array.from(gameState.players.values()).map((p, i) => {
+                        // Find owner ID
+                        const pid = [...gameState.players.entries()].find(([, v]) => v === p)?.[0]
+                        const pName = players.find(pl => pl.id === pid)?.username
                         return (
-                            <div key={player.id} className="mb-2">
-                                <div className="flex justify-between text-sm text-white mb-1">
-                                    <span>{player.username} {isElim && '💀'}</span>
-                                    <span>{prog}/{branches.length}</span>
-                                </div>
-                                <div className="h-3 bg-white/20 rounded-full overflow-hidden">
-                                    <motion.div
-                                        animate={{ width: `${(prog / branches.length) * 100}%` }}
-                                        className={clsx("h-full rounded-full", isElim ? "bg-red-500" : "bg-green-500")}
-                                    />
-                                </div>
+                            <div key={i} className="text-xs">
+                                {pName}: {p.progress}/{GOAL} {p.alive ? '' : '💀'}
                             </div>
                         )
                     })}
                 </div>
-            )}
 
-            {/* Controls */}
-            {phase === 'PLAYING' && !amEliminated && (
-                <div className="flex gap-8 pb-4">
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleChop('left')}
-                        className={clsx("w-24 h-24 rounded-xl text-3xl", mySide === 'left' ? "bg-green-500" : "bg-gray-600")}>
-                        ⬅️ IZQUIERDA
-                    </motion.button>
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleChop('right')}
-                        className={clsx("w-24 h-24 rounded-xl text-3xl", mySide === 'right' ? "bg-green-500" : "bg-gray-600")}>
-                        DERECHA ➡️
-                    </motion.button>
-                </div>
-            )}
-
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🪓</div>
-                        <div className="text-4xl font-pixel text-green-400">
-                            {players.find(p => p.id === winner)?.username} GANA!
-                        </div>
+                {/* Controls */}
+                {myState?.alive && isPlaying && (
+                    <div className="flex gap-16 pb-8 z-10">
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleChop('LEFT')}
+                            className="w-32 h-32 bg-white/20 backdrop-blur-sm rounded-full text-4xl shadow-lg border-b-4 border-white/50"
+                        >
+                            ⬅️
+                        </motion.button>
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleChop('RIGHT')}
+                            className="w-32 h-32 bg-white/20 backdrop-blur-sm rounded-full text-4xl shadow-lg border-b-4 border-white/50"
+                        >
+                            ➡️
+                        </motion.button>
                     </div>
-                </motion.div>
-            )}
-        </div>
+                )}
+            </div>
+        </MinigameWrapper>
     )
 }
 

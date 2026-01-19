@@ -1,370 +1,331 @@
-import { useEffect, useState, useCallback } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
-import { motion } from 'framer-motion'
-import clsx from 'clsx'
-import { playCountdownBeep, playWinFanfare, playFail, playGunshot, unlockAudio } from '../HighNoon/sounds'
+/**
+ * TankBattle - Strategy and reflexes!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
 
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
+import { motion } from 'framer-motion'
+import { playWinFanfare, playGunshot } from '../HighNoon/sounds'
 
 const ARENA_WIDTH = 300
 const ARENA_HEIGHT = 200
 const TANK_SIZE = 20
-const BULLET_SPEED = 5
-const GAME_DURATION = 15000 // 15 seconds
+const BULLET_SPEED = 150
+const MOVE_SPEED = 5
+const ROT_SPEED = 15
 
-interface TankState {
+interface Tank {
+    id: string
     x: number
     y: number
-    angle: number // 0-360 degrees
+    angle: number
     health: number
     lastShot: number
 }
 
 interface Bullet {
     id: string
-    x: number
+    ownerId: string
+    x: number // Start Pos
     y: number
     angle: number
-    ownerId: string
+    spawnTime: number
 }
 
-const TankBattle: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface TankBattleState {
+    tanks: Map<string, Tank>
+    bullets: Bullet[]
+    scores: Map<string, number>
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [timeLeft, setTimeLeft] = useState(GAME_DURATION)
-    const [tanks, setTanks] = useState<Map<string, TankState>>(new Map())
-    const [bullets, setBullets] = useState<Bullet[]>([])
-    const [winner, setWinner] = useState<string | null>(null)
-    const [score, setScore] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
+const TankBattle = () => {
+    const engine = useMinigameEngine<TankBattleState>({
+        config: {
+            countdownDuration: 3,
+            gameDuration: 60
+        },
+        initialGameState: {
+            tanks: new Map(),
+            bullets: [],
+            scores: new Map()
+        }
+    })
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const myTank = currentPlayer ? tanks.get(currentPlayer.id) : null
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame,
+        timeRemaining
+    } = engine
 
-    // Initialize tanks
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const [localTank, setLocalTank] = useState<Tank | null>(null)
+    const bulletIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+    // Init Tanks
     useEffect(() => {
-        const initialTanks = new Map<string, TankState>()
-        players.forEach((p, i) => {
-            initialTanks.set(p.id, {
-                x: i === 0 ? 30 : ARENA_WIDTH - 30,
-                y: ARENA_HEIGHT / 2,
-                angle: i === 0 ? 0 : 180,
-                health: 3,
-                lastShot: 0
+        if (players.length > 0 && gameState.tanks.size === 0 && isPlaying) {
+            const newTanks = new Map<string, Tank>()
+            players.forEach((p, i) => {
+                newTanks.set(p.id, {
+                    id: p.id,
+                    x: (i % 2 === 0) ? 30 : ARENA_WIDTH - 30, // Basic spawn points
+                    y: ARENA_HEIGHT / 2 + (i * 20),
+                    angle: (i % 2 === 0) ? 0 : 180,
+                    health: 3,
+                    lastShot: 0
+                })
             })
-        })
-        setTanks(initialTanks)
-    }, [players])
 
-    // Unlock audio
+            updateGameState(state => ({ ...state, tanks: newTanks }))
+        }
+    }, [players, isPlaying, gameState.tanks.size, updateGameState])
+
+    // Sync Local Tank from GameState initially and when needed
     useEffect(() => {
-        const handleInteraction = () => {
-            unlockAudio()
-            window.removeEventListener('pointerdown', handleInteraction)
+        if (currentPlayerId && gameState.tanks.has(currentPlayerId) && !localTank) {
+            setLocalTank(gameState.tanks.get(currentPlayerId)!)
         }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+    }, [currentPlayerId, gameState.tanks, localTank])
 
-    // Countdown
+    // Bullet Physics (Leader)
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    setPhase('PLAYING')
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-        return () => clearInterval(interval)
-    }, [phase])
+        if (!isPlaying || !isLeader || winnerId) return
 
-    // Game timer
-    useEffect(() => {
-        if (phase !== 'PLAYING') return
-        const interval = setInterval(() => {
-            setTimeLeft(prev => {
-                if (prev <= 100) {
-                    clearInterval(interval)
-                    if (isHost) endGame()
-                    return 0
-                }
-                return prev - 100
-            })
-        }, 100)
-        return () => clearInterval(interval)
-    }, [phase, isHost])
+        bulletIntervalRef.current = setInterval(() => {
+            updateGameState(state => {
+                const now = Date.now()
+                const nextBullets = []
+                const nextTanks = new Map(state.tanks)
+                const nextScores = new Map(state.scores)
+                let hitEvents = false
 
-    // Listen for broadcasts
-    useEffect(() => {
-        if (!lastBroadcast) return
+                for (const b of state.bullets) {
+                    // Check if old
+                    if (now - b.spawnTime > 3000) continue
 
-        if (lastBroadcast.type === 'TANK_MOVE') {
-            setTanks(prev => {
-                const next = new Map(prev)
-                const tank = next.get(lastBroadcast.playerId)
-                if (tank) {
-                    next.set(lastBroadcast.playerId, {
-                        ...tank,
-                        x: lastBroadcast.x,
-                        y: lastBroadcast.y,
-                        angle: lastBroadcast.angle
-                    })
-                }
-                return next
-            })
-        }
+                    // Calc current pos
+                    const elapsed = (now - b.spawnTime) / 1000
+                    const bx = b.x + Math.cos(b.angle * Math.PI / 180) * BULLET_SPEED * elapsed
+                    const by = b.y + Math.sin(b.angle * Math.PI / 180) * BULLET_SPEED * elapsed
 
-        if (lastBroadcast.type === 'TANK_SHOOT') {
-            playGunshot()
-            setBullets(prev => [...prev, {
-                id: lastBroadcast.bulletId,
-                x: lastBroadcast.x,
-                y: lastBroadcast.y,
-                angle: lastBroadcast.angle,
-                ownerId: lastBroadcast.playerId
-            }])
-        }
+                    // Bounds
+                    if (bx < 0 || bx > ARENA_WIDTH || by < 0 || by > ARENA_HEIGHT) continue
 
-        if (lastBroadcast.type === 'TANK_HIT') {
-            playFail()
-            setTanks(prev => {
-                const next = new Map(prev)
-                const tank = next.get(lastBroadcast.targetId)
-                if (tank) {
-                    next.set(lastBroadcast.targetId, { ...tank, health: tank.health - 1 })
-                }
-                return next
-            })
-            setScore(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.shooterId, (prev.get(lastBroadcast.shooterId) || 0) + 1)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'TANK_GAME_OVER') {
-            setPhase('ENDED')
-            setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) {
-                playWinFanfare()
-            }
-            if (isHost) {
-                setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-            }
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
-
-    const endGame = () => {
-        // Winner is player with most hits or most health remaining
-        const sortedByScore = [...score.entries()].sort((a, b) => b[1] - a[1])
-        const winnerId = sortedByScore[0]?.[0]
-        broadcastAndApply({ type: 'TANK_GAME_OVER', winnerId })
-    }
-
-    // Movement controls
-    const handleMove = useCallback((direction: 'up' | 'down' | 'left' | 'right' | 'shoot') => {
-        if (phase !== 'PLAYING' || !currentPlayer || !myTank) return
-
-        if (direction === 'shoot') {
-            const now = Date.now()
-            if (now - myTank.lastShot < 500) return // Cooldown
-
-            const bulletId = `${currentPlayer.id}_${now}`
-            const radians = myTank.angle * (Math.PI / 180)
-
-            broadcastAndApply({
-                type: 'TANK_SHOOT',
-                playerId: currentPlayer.id,
-                bulletId,
-                x: myTank.x + Math.cos(radians) * TANK_SIZE,
-                y: myTank.y + Math.sin(radians) * TANK_SIZE,
-                angle: myTank.angle
-            })
-
-            setTanks(prev => {
-                const next = new Map(prev)
-                next.set(currentPlayer.id, { ...myTank, lastShot: now })
-                return next
-            })
-            return
-        }
-
-        let newX = myTank.x
-        let newY = myTank.y
-        let newAngle = myTank.angle
-        const speed = 5
-
-        switch (direction) {
-            case 'up': newY = Math.max(TANK_SIZE, myTank.y - speed); break
-            case 'down': newY = Math.min(ARENA_HEIGHT - TANK_SIZE, myTank.y + speed); break
-            case 'left': newAngle = (myTank.angle - 15 + 360) % 360; break
-            case 'right': newAngle = (myTank.angle + 15) % 360; break
-        }
-
-        broadcastAndApply({
-            type: 'TANK_MOVE',
-            playerId: currentPlayer.id,
-            x: newX,
-            y: newY,
-            angle: newAngle
-        })
-    }, [phase, currentPlayer, myTank, broadcastAndApply])
-
-    // Bullet movement and collision (host only)
-    useEffect(() => {
-        if (phase !== 'PLAYING' || !isHost) return
-
-        const interval = setInterval(() => {
-            setBullets(prev => {
-                const newBullets: Bullet[] = []
-
-                for (const bullet of prev) {
-                    const radians = bullet.angle * (Math.PI / 180)
-                    const newX = bullet.x + Math.cos(radians) * BULLET_SPEED
-                    const newY = bullet.y + Math.sin(radians) * BULLET_SPEED
-
-                    // Out of bounds
-                    if (newX < 0 || newX > ARENA_WIDTH || newY < 0 || newY > ARENA_HEIGHT) continue
-
-                    // Check collision with tanks
+                    // Collision
                     let hit = false
-                    for (const [playerId, tank] of tanks) {
-                        if (playerId === bullet.ownerId) continue
-                        const dist = Math.sqrt((newX - tank.x) ** 2 + (newY - tank.y) ** 2)
+                    for (const [tid, tank] of nextTanks) {
+                        if (tank.health <= 0 || tid === b.ownerId) continue
+
+                        const dist = Math.sqrt((bx - tank.x) ** 2 + (by - tank.y) ** 2)
                         if (dist < TANK_SIZE) {
-                            broadcastAndApply({
-                                type: 'TANK_HIT',
-                                shooterId: bullet.ownerId,
-                                targetId: playerId
-                            })
+                            // Hit!
                             hit = true
+                            const newHealth = tank.health - 1
+                            nextTanks.set(tid, { ...tank, health: newHealth })
+                            nextScores.set(b.ownerId, (nextScores.get(b.ownerId) || 0) + 1)
+                            hitEvents = true
                             break
                         }
                     }
 
-                    if (!hit) {
-                        newBullets.push({ ...bullet, x: newX, y: newY })
-                    }
+                    if (!hit) nextBullets.push(b)
                 }
 
-                return newBullets
+                return hitEvents || nextBullets.length !== state.bullets.length
+                    ? { ...state, bullets: nextBullets, tanks: nextTanks, scores: nextScores }
+                    : state
             })
         }, 50)
 
-        return () => clearInterval(interval)
-    }, [phase, isHost, tanks, broadcastAndApply])
+        return () => { if (bulletIntervalRef.current) clearInterval(bulletIntervalRef.current) }
+    }, [isPlaying, isLeader, winnerId, updateGameState])
 
-    const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3']
+    // Game End
+    useEffect(() => {
+        if (!isPlaying || !isLeader || winnerId) return
+
+        const alive = Array.from(gameState.tanks.values()).filter(t => t.health > 0)
+
+        if (players.length > 1 && alive.length <= 1) {
+            // Last man standing wins, or highest score if simultaneous death?
+            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
+            // If someone is alive, they win regardless of score (Survival Mode). 
+            // Or score based? Let's go with Score + Survival Bonus?
+            // Simple: Last alive wins.
+            let winner = alive.length > 0 ? alive[0].id : sorted[0]?.[0]
+
+            if (winner === currentPlayerId) playWinFanfare()
+            endGame(winner)
+        } else if (timeRemaining !== null && timeRemaining <= 0) {
+            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
+            const winner = sorted[0]?.[0]
+            if (winner === currentPlayerId) playWinFanfare()
+            endGame(winner)
+        }
+    }, [gameState.tanks, gameState.scores, timeRemaining, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+
+
+    // Input Handling
+    const handleAction = useCallback((action: 'up' | 'down' | 'left' | 'right' | 'shoot') => {
+        if (!isPlaying || !localTank || localTank.health <= 0) return
+
+        if (action === 'shoot') {
+            const now = Date.now()
+            if (now - localTank.lastShot < 500) return // Cooldown
+
+            playGunshot()
+            // Optimistic update
+            setLocalTank(prev => prev ? ({ ...prev, lastShot: now }) : null)
+
+            // Spawn Bullet
+            updateGameState(state => ({
+                ...state,
+                tanks: new Map(state.tanks).set(localTank.id, { ...localTank, lastShot: now }), // Sync cooldown
+                bullets: [...state.bullets, {
+                    id: `b_${localTank.id}_${now}`,
+                    ownerId: localTank.id,
+                    x: localTank.x + Math.cos(localTank.angle * Math.PI / 180) * 25,
+                    y: localTank.y + Math.sin(localTank.angle * Math.PI / 180) * 25,
+                    angle: localTank.angle,
+                    spawnTime: now
+                }]
+            }))
+        } else {
+            // Movement
+            setLocalTank(prev => {
+                if (!prev) return null
+                let { x, y, angle } = prev
+                if (action === 'left') angle = (angle - ROT_SPEED + 360) % 360
+                if (action === 'right') angle = (angle + ROT_SPEED) % 360
+                if (action === 'up') {
+                    x += Math.cos(angle * Math.PI / 180) * MOVE_SPEED
+                    y += Math.sin(angle * Math.PI / 180) * MOVE_SPEED
+                }
+                if (action === 'down') {
+                    x -= Math.cos(angle * Math.PI / 180) * MOVE_SPEED
+                    y -= Math.sin(angle * Math.PI / 180) * MOVE_SPEED
+                }
+
+                // Bounds
+                x = Math.max(10, Math.min(ARENA_WIDTH - 10, x))
+                y = Math.max(10, Math.min(ARENA_HEIGHT - 10, y))
+
+                const next = { ...prev, x, y, angle }
+
+                // Sync position (throttled/direct)
+                // For this game, direct update is okay if not spamming too hard. 
+                // Normally we'd throttle this. 
+                updateGameState(state => ({
+                    ...state,
+                    tanks: new Map(state.tanks).set(prev.id, next)
+                }))
+
+                return next
+            })
+        }
+    }, [isPlaying, localTank, updateGameState])
+
+
+    const PLAYER_COLORS = ['#A3E635', '#60A5FA', '#F87171', '#FACC15']
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-green-900 to-green-950 select-none p-4">
-            {/* Header */}
-            <div className="text-center pt-2">
-                <h1 className="text-2xl md:text-4xl font-pixel text-white mb-2" style={{ textShadow: '0 0 15px #FF0' }}>
-                    🎖️ TANK BATTLE!
-                </h1>
-                {phase === 'COUNTDOWN' && (
-                    <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-6xl font-pixel text-yellow-400">
-                        {countdown}
-                    </motion.div>
-                )}
-                {phase === 'PLAYING' && (
-                    <div className="text-xl text-white">{(timeLeft / 1000).toFixed(1)}s</div>
-                )}
-            </div>
-
-            {/* Arena */}
-            <div
-                className="relative bg-green-800 border-4 border-yellow-600 rounded-lg overflow-hidden"
-                style={{ width: ARENA_WIDTH * 1.5, height: ARENA_HEIGHT * 1.5 }}
-            >
-                {/* Tanks */}
-                {[...tanks.entries()].map(([playerId, tank], idx) => (
-                    <motion.div
-                        key={playerId}
-                        className="absolute"
-                        style={{
-                            left: tank.x * 1.5 - TANK_SIZE,
-                            top: tank.y * 1.5 - TANK_SIZE,
-                            width: TANK_SIZE * 2,
-                            height: TANK_SIZE * 2,
-                        }}
-                        animate={{ rotate: tank.angle }}
-                    >
-                        <div
-                            className="w-full h-full rounded-sm"
-                            style={{
-                                backgroundColor: PLAYER_COLORS[idx % PLAYER_COLORS.length],
-                                opacity: tank.health > 0 ? 1 : 0.3
-                            }}
-                        >
-                            {/* Cannon */}
-                            <div className="absolute top-1/2 left-1/2 w-3 h-6 bg-gray-700 -translate-y-1/2" />
-                        </div>
-                        <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-xs text-white whitespace-nowrap">
-                            ❤️{tank.health}
-                        </div>
-                    </motion.div>
-                ))}
-
-                {/* Bullets */}
-                {bullets.map(bullet => (
-                    <div
-                        key={bullet.id}
-                        className="absolute w-2 h-2 bg-yellow-400 rounded-full"
-                        style={{
-                            left: bullet.x * 1.5 - 4,
-                            top: bullet.y * 1.5 - 4,
-                            boxShadow: '0 0 5px #FFD700'
-                        }}
-                    />
-                ))}
-            </div>
-
-            {/* Controls */}
-            {phase === 'PLAYING' && (
-                <div className="grid grid-cols-3 gap-2 mt-4">
-                    <div />
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('up')} className="w-12 h-12 bg-gray-700 rounded text-2xl">⬆️</motion.button>
-                    <div />
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('left')} className="w-12 h-12 bg-gray-700 rounded text-2xl">⬅️</motion.button>
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('shoot')} className="w-12 h-12 bg-red-600 rounded text-xl">🔥</motion.button>
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('right')} className="w-12 h-12 bg-gray-700 rounded text-2xl">➡️</motion.button>
-                    <div />
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('down')} className="w-12 h-12 bg-gray-700 rounded text-2xl">⬇️</motion.button>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            timeRemaining={timeRemaining}
+            backgroundColor="bg-gradient-to-b from-green-900 to-stone-900"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🎖️ TANK BATTLE
+                    </h1>
                 </div>
-            )}
 
-            {/* Scores */}
-            <div className="flex gap-4 mt-2">
-                {players.map((p, i) => (
-                    <div key={p.id} className={clsx("text-center px-3 py-1 rounded", p.id === currentPlayer?.id && "border border-white")}>
-                        <div className="text-sm" style={{ color: PLAYER_COLORS[i] }}>{p.username}</div>
-                        <div className="text-lg text-yellow-400">{score.get(p.id) || 0} hits</div>
+                {/* Arena */}
+                <div className="relative w-full max-w-lg aspect-video bg-stone-800 rounded-xl overflow-hidden border-4 border-stone-600 shadow-2xl">
+                    {/* Tanks */}
+                    {Array.from(gameState.tanks.values()).map((tank, idx) => {
+                        const isMe = tank.id === currentPlayerId
+                        // Use local state for me if available for smoothness
+                        const displayTank = (isMe && localTank) ? localTank : tank
+                        if (displayTank.health <= 0) return null
+
+                        return (
+                            <motion.div
+                                key={tank.id}
+                                className="absolute w-8 h-8 flex items-center justify-center"
+                                animate={{
+                                    left: (displayTank.x / ARENA_WIDTH) * 100 + '%',
+                                    top: (displayTank.y / ARENA_HEIGHT) * 100 + '%',
+                                    rotate: displayTank.angle
+                                }}
+                                style={{ marginLeft: -16, marginTop: -16 }}
+                                transition={{ type: 'tween', duration: isMe ? 0 : 0.1 }}
+                            >
+                                <div
+                                    className="w-full h-full rounded border-2 border-black/50"
+                                    style={{ backgroundColor: PLAYER_COLORS[idx % PLAYER_COLORS.length] }}
+                                >
+                                    {/* Cannon */}
+                                    <div className="absolute top-1/2 left-1/2 h-1.5 w-6 bg-black origin-left transform -translate-y-1/2" />
+                                </div>
+                                <div className="absolute -top-6 transform -rotate-0 text-xs text-white bg-black/50 px-1 rounded">
+                                    hit:{gameState.scores.get(tank.id) || 0}
+                                </div>
+                            </motion.div>
+                        )
+                    })}
+
+                    {/* Bullets */}
+                    {gameState.bullets.map(b => {
+                        const elapsed = (Date.now() - b.spawnTime) / 1000
+                        // Render logic: duplicate leader physics for smooth render
+                        const dist = 150 * elapsed
+                        const bx = b.x + Math.cos(b.angle * Math.PI / 180) * dist
+                        const by = b.y + Math.sin(b.angle * Math.PI / 180) * dist
+
+                        if (bx < 0 || bx > ARENA_WIDTH || by < 0 || by > ARENA_HEIGHT) return null
+
+                        return (
+                            <div
+                                key={b.id}
+                                className="absolute w-2 h-2 bg-yellow-400 rounded-full shadow-[0_0_5px_yellow]"
+                                style={{
+                                    left: (bx / ARENA_WIDTH) * 100 + '%',
+                                    top: (by / ARENA_HEIGHT) * 100 + '%',
+                                    transform: 'translate(-50%, -50%)'
+                                }}
+                            />
+                        )
+                    })}
+                </div>
+
+                {/* Controls */}
+                {localTank && localTank.health > 0 && isPlaying && (
+                    <div className="grid grid-cols-3 gap-2 pb-4">
+                        <div />
+                        <motion.button whileTap={{ scale: 0.95 }} onPointerDown={() => handleAction('up')} className="w-16 h-16 bg-gray-700 rounded-lg text-2xl">⬆️</motion.button>
+                        <div />
+                        <motion.button whileTap={{ scale: 0.95 }} onPointerDown={() => handleAction('left')} className="w-16 h-16 bg-gray-700 rounded-lg text-2xl">⬅️</motion.button>
+                        <motion.button whileTap={{ scale: 0.95 }} onPointerDown={() => handleAction('shoot')} className="w-16 h-16 bg-red-600 rounded-lg text-2xl border-b-4 border-red-800">🔥</motion.button>
+                        <motion.button whileTap={{ scale: 0.95 }} onPointerDown={() => handleAction('right')} className="w-16 h-16 bg-gray-700 rounded-lg text-2xl">➡️</motion.button>
+                        <div />
+                        <motion.button whileTap={{ scale: 0.95 }} onPointerDown={() => handleAction('down')} className="w-16 h-16 bg-gray-700 rounded-lg text-2xl">⬇️</motion.button>
+                        <div />
                     </div>
-                ))}
+                )}
             </div>
-
-            {/* Winner */}
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🏆</div>
-                        <div className="text-4xl font-pixel text-yellow-400">
-                            {players.find(p => p.id === winner)?.username} WINS!
-                        </div>
-                    </div>
-                </motion.div>
-            )}
-        </div>
+        </MinigameWrapper>
     )
 }
 

@@ -1,224 +1,189 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * InverseArrows - Press the OPPOSITE direction!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect, useState, useRef } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
 type Direction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT'
-
 const TOTAL_ROUNDS = 10
+const DIRECTIONS: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT']
 
-const InverseArrows: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface InverseArrowsState {
+    round: number
+    currentDirection: Direction
+    scores: Map<string, number>
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [round, setRound] = useState(0)
-    const [currentDirection, setCurrentDirection] = useState<Direction>('UP')
-    const [scores, setScores] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
-    const [answered, setAnswered] = useState<Set<string>>(new Set())
-    const [winner, setWinner] = useState<string | null>(null)
+const InverseArrows = () => {
+    const engine = useMinigameEngine<InverseArrowsState>({
+        config: { countdownDuration: 3 },
+        initialGameState: {
+            round: 0,
+            currentDirection: 'UP',
+            scores: new Map()
+        }
+    })
+
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
+
+    const [answered, setAnswered] = useState(false)
     const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null)
-    const [roundTimeout, setRoundTimeout] = useState(false)
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const roundTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isHostRef = useRef(isHost)
-    isHostRef.current = isHost
-    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    // Helper to start next round
+    const nextRound = useCallback(() => {
+        if (!isLeader) return
 
-    const DIRECTIONS: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT']
-    const OPPOSITE: Record<Direction, Direction> = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' }
-    const ARROWS: Record<Direction, string> = { UP: '⬆️', DOWN: '⬇️', LEFT: '⬅️', RIGHT: '➡️' }
-
-    // Reset ref on mount
-    useEffect(() => {
-        if (timerRef.current) clearTimeout(timerRef.current)
-        timerRef.current = null
-    }, [])
-
-    useEffect(() => {
-        const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
-
-    useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    if (isHostRef.current) {
-                        startRound()
-                    }
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-
-        return () => clearInterval(interval)
-    }, [phase])
-
-    const startRound = useCallback(() => {
-        const newRound = round + 1
-        if (newRound > TOTAL_ROUNDS) {
-            const sortedScores = [...scores.entries()].sort((a, b) => b[1] - a[1])
-            broadcastAndApply({ type: 'INVERSE_GAME_OVER', winnerId: sortedScores[0]?.[0] })
+        const nextR = gameState.round + 1
+        if (nextR > TOTAL_ROUNDS) {
+            // Game Over
+            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
+            const winner = sorted[0]?.[0] || null
+            endGame(winner)
             return
         }
 
-        const dir = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)]
-        broadcastAndApply({ type: 'INVERSE_NEW_ROUND', round: newRound, direction: dir })
-    }, [round, scores, broadcastAndApply])
+        const nextDir = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)]
+        updateGameState(state => ({
+            ...state,
+            round: nextR,
+            currentDirection: nextDir
+        }))
 
+    }, [gameState.round, gameState.scores, isLeader, updateGameState, endGame])
+
+    // Initial Start
     useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'INVERSE_NEW_ROUND') {
-            setRound(lastBroadcast.round)
-            setCurrentDirection(lastBroadcast.direction)
-            setAnswered(new Set())
-            setFeedback(null)
-            setRoundTimeout(false)
-            setPhase('PLAYING')
-
-            // Round timeout
-            if (timerRef.current) clearTimeout(timerRef.current)
-            timerRef.current = setTimeout(() => {
-                setRoundTimeout(true)
-                if (isHost) setTimeout(() => startRound(), 1000)
-            }, 2000)
+        if (isPlaying && isLeader && gameState.round === 0) {
+            nextRound()
         }
+    }, [isPlaying, isLeader, gameState.round, nextRound])
 
-        if (lastBroadcast.type === 'INVERSE_ANSWER') {
-            setAnswered(prev => new Set(prev).add(lastBroadcast.playerId))
-
-            if (lastBroadcast.correct) {
-                setScores(prev => {
-                    const next = new Map(prev)
-                    next.set(lastBroadcast.playerId, (prev.get(lastBroadcast.playerId) || 0) + 1)
-                    return next
-                })
-            }
-        }
-
-        if (lastBroadcast.type === 'INVERSE_GAME_OVER') {
-            if (timerRef.current) clearTimeout(timerRef.current)
-            setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, startRound, onGameEnd])
-
+    // Reset local state on round change
     useEffect(() => {
-        return () => { if (timerRef.current) clearTimeout(timerRef.current) }
-    }, [])
+        setAnswered(false)
+        setFeedback(null)
+    }, [gameState.round])
+
+    // Auto-advance round logic (if everyone answered OR timeout)
+    useEffect(() => {
+        if (!isPlaying || !isLeader || winnerId) return
+
+        // We can use a simple timer for each round (e.g. 2 seconds)
+        if (roundTimerRef.current) clearTimeout(roundTimerRef.current)
+        roundTimerRef.current = setTimeout(() => {
+            nextRound()
+        }, 2500) // 2.5 seconds per round
+
+        return () => { if (roundTimerRef.current) clearTimeout(roundTimerRef.current) }
+    }, [gameState.round, isPlaying, isLeader, winnerId, nextRound])
+
+
+    const OPPOSITE: Record<Direction, Direction> = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' }
+    const ARROWS: Record<Direction, string> = { UP: '⬆️', DOWN: '⬇️', LEFT: '⬅️', RIGHT: '➡️' }
 
     const handleAnswer = useCallback((dir: Direction) => {
-        if (phase !== 'PLAYING' || !currentPlayer || answered.has(currentPlayer.id) || roundTimeout) return
+        if (!isPlaying || !currentPlayerId || answered) return
 
-        const correctAnswer = OPPOSITE[currentDirection]
+        const correctAnswer = OPPOSITE[gameState.currentDirection]
         const isCorrect = dir === correctAnswer
 
-        if (isCorrect) playTap()
-        else playFail()
-
+        setAnswered(true)
         setFeedback(isCorrect ? 'correct' : 'wrong')
 
-        broadcastAndApply({
-            type: 'INVERSE_ANSWER',
-            playerId: currentPlayer.id,
-            correct: isCorrect
-        })
-
-        if (isHost && !roundTimeout) {
-            if (timerRef.current) clearTimeout(timerRef.current)
-            setTimeout(() => startRound(), 1000)
+        if (isCorrect) {
+            playTap()
+            updateGameState(state => ({
+                ...state,
+                scores: new Map([...state.scores, [currentPlayerId, (state.scores.get(currentPlayerId) || 0) + 1]])
+            }))
+        } else {
+            playFail()
         }
-    }, [phase, currentPlayer, answered, roundTimeout, currentDirection, isHost, startRound, broadcastAndApply])
+    }, [isPlaying, currentPlayerId, answered, gameState.currentDirection, updateGameState])
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-rose-800 to-rose-950 select-none p-4">
-            <div className="text-center pt-2">
-                <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>🔄 FLECHAS INVERSAS!</h1>
-                <p className="text-lg text-pink-300">¡Presiona la dirección OPUESTA!</p>
-                {phase === 'PLAYING' && <div className="text-sm text-white/70">Ronda {round} / {TOTAL_ROUNDS}</div>}
-            </div>
-
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">{countdown}</motion.div>
-            )}
-
-            {phase === 'PLAYING' && (
-                <div className="flex-1 flex flex-col items-center justify-center">
-                    {/* Current arrow to invert */}
-                    <motion.div
-                        key={round}
-                        initial={{ scale: 0, rotate: -180 }}
-                        animate={{ scale: 1, rotate: 0 }}
-                        className="text-8xl mb-8"
-                    >
-                        {ARROWS[currentDirection]}
-                    </motion.div>
-
-                    {/* Feedback */}
-                    {feedback && (
-                        <motion.div
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            className={clsx("text-3xl mb-4", feedback === 'correct' ? "text-green-400" : "text-red-400")}
-                        >
-                            {feedback === 'correct' ? '✓ CORRECTO!' : '✗ INCORRECTO!'}
-                        </motion.div>
-                    )}
-
-                    {/* Answer buttons */}
-                    {!answered.has(currentPlayer?.id || '') && !roundTimeout && (
-                        <div className="grid grid-cols-3 gap-2">
-                            <div />
-                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('UP')}
-                                className="w-16 h-16 bg-rose-600 rounded-xl text-3xl">⬆️</motion.button>
-                            <div />
-                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('LEFT')}
-                                className="w-16 h-16 bg-rose-600 rounded-xl text-3xl">⬅️</motion.button>
-                            <div />
-                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('RIGHT')}
-                                className="w-16 h-16 bg-rose-600 rounded-xl text-3xl">➡️</motion.button>
-                            <div />
-                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('DOWN')}
-                                className="w-16 h-16 bg-rose-600 rounded-xl text-3xl">⬇️</motion.button>
-                        </div>
-                    )}
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-rose-800 to-rose-950"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🔄 INVERSE ARROWS!
+                    </h1>
+                    <p className="text-lg text-pink-300">Tap the OPPOSITE!</p>
+                    {isPlaying && <div className="text-sm text-white/50">Round {gameState.round} / {TOTAL_ROUNDS}</div>}
                 </div>
-            )}
 
-            {/* Scores */}
-            <div className="flex gap-4 pb-4">
-                {players.map(player => (
-                    <div key={player.id} className={clsx("text-center px-4 py-2 rounded-lg", player.id === currentPlayer?.id ? "bg-rose-700" : "bg-white/10")}>
-                        <div className="text-sm text-white/70">{player.username}</div>
-                        <div className="text-2xl font-pixel text-pink-400">{scores.get(player.id) || 0}</div>
-                    </div>
-                ))}
-            </div>
+                {isPlaying && gameState.round > 0 && (
+                    <div className="flex-1 flex flex-col items-center justify-center">
+                        <motion.div
+                            key={gameState.round}
+                            initial={{ scale: 0, rotate: -180 }}
+                            animate={{ scale: 1, rotate: 0 }}
+                            className="text-9xl mb-12"
+                        >
+                            {ARROWS[gameState.currentDirection]}
+                        </motion.div>
 
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🔄</div>
-                        <div className="text-4xl font-pixel text-pink-400">
-                            {players.find(p => p.id === winner)?.username} GANA!
+                        {/* Controls */}
+                        <div className="grid grid-cols-3 gap-4">
+                            <div />
+                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('UP')} disabled={answered}
+                                className={clsx("w-20 h-20 bg-rose-600 rounded-xl text-4xl shadow-lg border-b-4 border-rose-800", answered && "opacity-50")}>⬆️</motion.button>
+                            <div />
+                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('LEFT')} disabled={answered}
+                                className={clsx("w-20 h-20 bg-rose-600 rounded-xl text-4xl shadow-lg border-b-4 border-rose-800", answered && "opacity-50")}>⬅️</motion.button>
+                            <div />
+                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('RIGHT')} disabled={answered}
+                                className={clsx("w-20 h-20 bg-rose-600 rounded-xl text-4xl shadow-lg border-b-4 border-rose-800", answered && "opacity-50")}>➡️</motion.button>
+                            <div />
+                            <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleAnswer('DOWN')} disabled={answered}
+                                className={clsx("w-20 h-20 bg-rose-600 rounded-xl text-4xl shadow-lg border-b-4 border-rose-800", answered && "opacity-50")}>⬇️</motion.button>
+                            <div />
                         </div>
+
+                        {feedback && (
+                            <motion.div
+                                initial={{ scale: 0 }}
+                                animate={{ scale: 1 }}
+                                className={clsx("absolute top-1/2 text-4xl font-bold bg-black/50 px-4 py-2 rounded", feedback === 'correct' ? "text-green-400" : "text-red-400")}
+                            >
+                                {feedback === 'correct' ? '✓' : '✗'}
+                            </motion.div>
+                        )}
                     </div>
-                </motion.div>
-            )}
-        </div>
+                )}
+
+                <div className="flex gap-4 pb-4">
+                    {players.map(player => (
+                        <div key={player.id} className={clsx("text-center px-4 py-2 rounded-lg", player.id === currentPlayerId ? "bg-rose-700" : "bg-white/10")}>
+                            <div className="text-sm text-white/70">{player.username}</div>
+                            <div className="text-2xl font-pixel text-pink-400">{gameState.scores.get(player.id) || 0}</div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </MinigameWrapper>
     )
 }
 

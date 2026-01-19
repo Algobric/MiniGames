@@ -1,161 +1,168 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * BalloonPop - Inflate without popping!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect, useRef } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
-
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
 const MAX_SIZE = 100
 const POP_THRESHOLD = 95 // Above this, risk of popping
 
-const BalloonPop: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface BalloonPopState {
+    balloonSizes: Map<string, number>
+    popped: Set<string>
+    locked: Set<string>
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [timeLeft, setTimeLeft] = useState(10000) // 10 seconds
-    const [balloonSizes, setBalloonSizes] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 20])))
-    const [popped, setPopped] = useState<Set<string>>(new Set())
-    const [locked, setLocked] = useState<Set<string>>(new Set())
-    const [winner, setWinner] = useState<string | null>(null)
+const BalloonPop = () => {
+    const engine = useMinigameEngine<BalloonPopState>({
+        config: {
+            countdownDuration: 3,
+            gameDuration: 10 // 10 seconds
+        },
+        initialGameState: {
+            balloonSizes: new Map(),
+            popped: new Set(),
+            locked: new Set()
+        }
+    })
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isHostRef = useRef(isHost)
-    isHostRef.current = isHost
+    const {
+        phase,
+        countdown,
+        timeRemaining,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
 
+    const gameEndedRef = useRef(false) // Local ref to prevent double triggers in effect
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const startSize = 20
+
+    // Initialize state
     useEffect(() => {
-        const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+        if (players.length > 0 && gameState.balloonSizes.size === 0) {
+            updateGameState(state => ({
+                ...state,
+                balloonSizes: new Map(players.map(p => [p.id, startSize])),
+                popped: new Set(),
+                locked: new Set()
+            }))
+        }
+    }, [players, gameState.balloonSizes.size, updateGameState])
 
+    // Handle Time Out
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) { clearInterval(interval); playCountdownBeep(true); setPhase('PLAYING'); return 0 }
-                playCountdownBeep(false); return prev - 1
-            })
-        }, 1000)
-        return () => clearInterval(interval)
-    }, [phase])
+        if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
 
-    useEffect(() => {
-        if (phase !== 'PLAYING') return
-        const interval = setInterval(() => {
-            setTimeLeft(prev => {
-                if (prev <= 100) {
-                    clearInterval(interval)
-                    if (isHostRef.current) endGame()
-                    return 0
+        if (timeRemaining !== null && timeRemaining <= 0) {
+            // Determine winner
+            gameEndedRef.current = true
+
+            const activePlayers = players.filter(p => !gameState.popped.has(p.id))
+            let bestId: string | null = null
+            let maxSize = -1
+
+            for (const p of activePlayers) {
+                const size = gameState.balloonSizes.get(p.id) || 0
+                if (size > maxSize) {
+                    maxSize = size
+                    bestId = p.id
                 }
-                return prev - 100
-            })
-        }, 100)
-        return () => clearInterval(interval)
-    }, [phase])
+            }
 
-    const endGame = useCallback(() => {
-        const activePlayers = players.filter(p => !popped.has(p.id))
-        let winnerId: string | null = null
-        let maxSize = -1
-
-        for (const p of activePlayers) {
-            const size = balloonSizes.get(p.id) || 0
-            if (size > maxSize) { maxSize = size; winnerId = p.id }
+            if (bestId === currentPlayerId) playWinFanfare()
+            endGame(bestId)
         }
-
-        broadcastAndApply({ type: 'BALLOON_GAME_OVER', winnerId })
-    }, [players, popped, balloonSizes, broadcastAndApply])
-
-    useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'BALLOON_INFLATE') {
-            setBalloonSizes(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.size)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'BALLOON_POP') {
-            setPopped(prev => new Set(prev).add(lastBroadcast.playerId))
-            if (lastBroadcast.playerId === currentPlayer?.id) playFail()
-        }
-
-        if (lastBroadcast.type === 'BALLOON_LOCK') {
-            setLocked(prev => new Set(prev).add(lastBroadcast.playerId))
-        }
-
-        if (lastBroadcast.type === 'BALLOON_GAME_OVER') {
-            setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
+    }, [timeRemaining, isPlaying, isLeader, winnerId, gameState.popped, gameState.balloonSizes, players, currentPlayerId, endGame])
 
     const handlePump = useCallback(() => {
-        if (phase !== 'PLAYING' || !currentPlayer) return
-        if (popped.has(currentPlayer.id) || locked.has(currentPlayer.id)) return
+        if (!isPlaying || !currentPlayerId) return
+        if (gameState.popped.has(currentPlayerId) || gameState.locked.has(currentPlayerId)) return
 
-        const currentSize = balloonSizes.get(currentPlayer.id) || 20
+        const currentSize = gameState.balloonSizes.get(currentPlayerId) || startSize
         const newSize = Math.min(MAX_SIZE, currentSize + 3)
         playTap()
 
         // Risk calculation: bigger balloon = higher chance of popping
+        // Client-side authoritative pop check is fine here
         if (newSize > POP_THRESHOLD) {
             const popChance = (newSize - POP_THRESHOLD) / (MAX_SIZE - POP_THRESHOLD) * 0.3
             if (Math.random() < popChance) {
-                broadcastAndApply({ type: 'BALLOON_POP', playerId: currentPlayer.id })
+                playFail()
+                updateGameState(state => ({
+                    ...state,
+                    popped: new Set([...state.popped, currentPlayerId])
+                }))
                 return
             }
         }
 
-        setBalloonSizes(prev => { const next = new Map(prev); next.set(currentPlayer.id, newSize); return next })
-        broadcastAndApply({ type: 'BALLOON_INFLATE', playerId: currentPlayer.id, size: newSize })
-    }, [phase, currentPlayer, popped, locked, balloonSizes, broadcastAndApply])
+        updateGameState(state => ({
+            ...state,
+            balloonSizes: new Map([...state.balloonSizes, [currentPlayerId, newSize]])
+        }))
+
+    }, [isPlaying, currentPlayerId, gameState.popped, gameState.locked, gameState.balloonSizes, updateGameState])
 
     const handleLock = useCallback(() => {
-        if (phase !== 'PLAYING' || !currentPlayer) return
-        if (popped.has(currentPlayer.id) || locked.has(currentPlayer.id)) return
-        broadcastAndApply({ type: 'BALLOON_LOCK', playerId: currentPlayer.id })
-    }, [phase, currentPlayer, popped, locked, broadcastAndApply])
+        if (!isPlaying || !currentPlayerId) return
+        if (gameState.popped.has(currentPlayerId) || gameState.locked.has(currentPlayerId)) return
+
+        updateGameState(state => ({
+            ...state,
+            locked: new Set([...state.locked, currentPlayerId])
+        }))
+    }, [isPlaying, currentPlayerId, gameState.popped, gameState.locked, updateGameState])
 
     const COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3', '#DDA0DD', '#87CEEB']
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-sky-300 to-sky-500 select-none p-4">
-            <div className="text-center pt-2">
-                <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>🎈 INFLA EL GLOBO!</h1>
-                {phase === 'PLAYING' && <div className="text-xl text-yellow-300">{(timeLeft / 1000).toFixed(1)}s</div>}
-            </div>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            timeRemaining={timeRemaining}
+            backgroundColor="bg-gradient-to-b from-sky-300 to-sky-500"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🎈 BALLOON POP!
+                    </h1>
+                </div>
 
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">{countdown}</motion.div>
-            )}
-
-            {phase !== 'COUNTDOWN' && (
-                <div className="flex-1 flex items-center justify-center gap-8 flex-wrap">
+                <div className="flex-1 flex items-center justify-center gap-8 flex-wrap content-center">
                     {players.map((player, idx) => {
-                        const size = balloonSizes.get(player.id) || 20
-                        const hasPopped = popped.has(player.id)
-                        const isLocked = locked.has(player.id)
+                        const size = gameState.balloonSizes.get(player.id) || startSize
+                        const hasPopped = gameState.popped.has(player.id)
+                        const isLocked = gameState.locked.has(player.id)
+                        const isWinner = player.id === winnerId
 
                         return (
                             <div key={player.id} className="text-center">
                                 <div className="text-sm text-white mb-2">{player.username}</div>
                                 <motion.div
-                                    animate={{ scale: hasPopped ? 0 : 1, opacity: hasPopped ? 0 : 1 }}
-                                    className="relative"
-                                    style={{ width: size * 1.5, height: size * 1.8 }}
+                                    animate={{
+                                        scale: hasPopped ? 0 : 1,
+                                        opacity: hasPopped ? 0 : 1
+                                    }}
+                                    className="relative flex items-center justify-center"
+                                    style={{ width: 150, height: 180 }} // Fixed container to avoid jumping
                                 >
                                     {!hasPopped && (
                                         <>
                                             <div
-                                                className={clsx("rounded-full mx-auto", isLocked && "ring-4 ring-green-400")}
+                                                className={clsx("rounded-full mx-auto transition-all duration-200", isLocked && "ring-4 ring-green-400")}
                                                 style={{
                                                     width: size * 1.5,
                                                     height: size * 1.8,
@@ -163,45 +170,45 @@ const BalloonPop: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
                                                     boxShadow: size > POP_THRESHOLD ? '0 0 20px #FF0000' : 'none'
                                                 }}
                                             />
-                                            <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-8 border-transparent border-t-gray-600" />
+                                            {/* String of balloon */}
+                                            <div className="absolute top-[85%] left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-8 border-transparent border-t-gray-600"
+                                                style={{ transform: `translate(-50%, ${size * 0.9}px)` }} // Move string with size? Actually keeping it simple for now
+                                            />
                                         </>
                                     )}
                                     {hasPopped && <div className="text-4xl">💥</div>}
+                                    {isWinner && <div className="absolute -top-10 text-4xl">👑</div>}
                                 </motion.div>
-                                <div className="text-xs text-white/70 mt-2">
-                                    {hasPopped ? 'EXPLOTÓ!' : isLocked ? '🔒 BLOQUEADO' : `${Math.round(size)}%`}
+                                <div className="text-xs text-white/70 mt-2 font-pixel">
+                                    {hasPopped ? 'POPPED!' : isLocked ? 'LOCKED' : `${Math.round(size)}%`}
                                 </div>
                             </div>
                         )
                     })}
                 </div>
-            )}
 
-            {phase === 'PLAYING' && currentPlayer && !popped.has(currentPlayer.id) && !locked.has(currentPlayer.id) && (
-                <div className="flex gap-4 pb-4">
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={handlePump}
-                        className="px-8 py-4 text-xl font-pixel bg-red-500 text-white rounded-xl shadow-lg">
-                        💨 INFLAR
-                    </motion.button>
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={handleLock}
-                        className="px-8 py-4 text-xl font-pixel bg-green-500 text-white rounded-xl shadow-lg">
-                        🔒 PARAR
-                    </motion.button>
-                </div>
-            )}
-
-            {phase === 'ENDED' && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🎈</div>
-                        <div className="text-4xl font-pixel text-pink-400">
-                            {winner ? `${players.find(p => p.id === winner)?.username} GANA!` : 'TODOS EXPLOTARON!'}
-                        </div>
+                {isPlaying && currentPlayerId && !gameState.popped.has(currentPlayerId) && !gameState.locked.has(currentPlayerId) && (
+                    <div className="flex gap-4 pb-4">
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onClick={handlePump}
+                            className="px-8 py-4 text-xl font-pixel bg-red-500 text-white rounded-xl shadow-lg border-b-4 border-red-700 active:border-b-0 active:translate-y-1"
+                        >
+                            💨 PUMP
+                        </motion.button>
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onClick={handleLock}
+                            className="px-8 py-4 text-xl font-pixel bg-green-500 text-white rounded-xl shadow-lg border-b-4 border-green-700 active:border-b-0 active:translate-y-1"
+                        >
+                            🔒 HOLD
+                        </motion.button>
                     </div>
-                </motion.div>
-            )}
-        </div>
+                )}
+            </div>
+        </MinigameWrapper>
     )
 }
+
 
 export default BalloonPop

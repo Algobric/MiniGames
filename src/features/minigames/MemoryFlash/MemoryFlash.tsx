@@ -1,373 +1,266 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * MemoryFlash - Remember the sequence!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useEffect, useCallback, useRef } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion, AnimatePresence } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playFail, playWinFanfare } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'SHOWING' | 'INPUT' | 'RESULT' | 'ENDED'
-
-
-const COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3'] // Red, Cyan, Yellow, Mint
+const COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3']
 const BUTTON_LABELS = ['🔴', '🔵', '🟡', '🟢']
 const STARTING_LENGTH = 3
 const MAX_LENGTH = 10
 
-const MemoryFlash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface MemoryFlashState {
+    round: number
+    sequence: number[]
+    showingIndex: number
+    playerInput: number[]
+    alivePlayers: Set<string>
+    roundResults: Map<string, boolean>
+    localPhase: 'SHOWING' | 'INPUT' | 'RESULT'
+    flashButton: number | null
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [round, setRound] = useState(0)
-    const [sequence, setSequence] = useState<number[]>([])
-    const [showingIndex, setShowingIndex] = useState(-1)
-    const [playerInput, setPlayerInput] = useState<number[]>([])
-    const [alivePlayers, setAlivePlayers] = useState<Set<string>>(new Set(players.map(p => p.id)))
-    const [roundResults, setRoundResults] = useState<Map<string, boolean>>(new Map())
-    const [winner, setWinner] = useState<string | null>(null)
-    const [flashButton, setFlashButton] = useState<number | null>(null)
+const MemoryFlash = () => {
+    const engine = useMinigameEngine<MemoryFlashState>({
+        config: { countdownDuration: 3 },
+        initialGameState: {
+            round: 0,
+            sequence: [],
+            showingIndex: -1,
+            playerInput: [],
+            alivePlayers: new Set(),
+            roundResults: new Map(),
+            localPhase: 'SHOWING',
+            flashButton: null
+        }
+    })
+
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        endGame,
+        updateGameState
+    } = engine
 
     const inputRef = useRef<number[]>([])
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isAlive = currentPlayer ? alivePlayers.has(currentPlayer.id) : false
+    const gameEndedRef = useRef(false)
+    const isAlive = currentPlayerId ? gameState.alivePlayers.has(currentPlayerId) : false
 
-    // Reset ref on mount
+    // Initialize alive players
     useEffect(() => {
-        inputRef.current = []
-    }, [])
-
-    // Unlock audio
-    useEffect(() => {
-        const handleInteraction = () => {
-            unlockAudio()
-            window.removeEventListener('pointerdown', handleInteraction)
+        if (players.length > 0 && gameState.alivePlayers.size === 0) {
+            updateGameState(state => ({
+                ...state,
+                alivePlayers: new Set(players.map(p => p.id))
+            }))
         }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+    }, [players, gameState.alivePlayers.size, updateGameState])
 
-    // Countdown
+    // Start first round
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-
-        return () => clearInterval(interval)
-    }, [phase])
-
-    // Start game after countdown
-    useEffect(() => {
-        if (countdown === 0 && phase === 'COUNTDOWN') {
-            playCountdownBeep(true)
-
-            if (isHost) {
-                startNewRound(1, STARTING_LENGTH)
-            }
+        if (isPlaying && gameState.round === 0 && gameState.sequence.length === 0) {
+            startNewRound(1, STARTING_LENGTH)
         }
-    }, [countdown, phase, isHost])
+    }, [isPlaying, gameState.round, gameState.sequence.length])
 
     const startNewRound = useCallback((roundNum: number, length: number) => {
-        // Generate random sequence
         const newSequence: number[] = []
         for (let i = 0; i < length; i++) {
             newSequence.push(Math.floor(Math.random() * 4))
         }
 
-        broadcastAndApply({
-            type: 'MEMORY_NEW_ROUND',
+        inputRef.current = []
+        updateGameState(() => ({
             round: roundNum,
-            sequence: newSequence
-        })
-    }, [broadcastAndApply])
+            sequence: newSequence,
+            showingIndex: -1,
+            playerInput: [],
+            roundResults: new Map(),
+            localPhase: 'SHOWING' as const,
+            flashButton: null,
+            alivePlayers: gameState.alivePlayers
+        }))
+    }, [gameState.alivePlayers, updateGameState])
 
     // Show sequence animation
     useEffect(() => {
-        if (phase !== 'SHOWING' || sequence.length === 0) return
+        if (gameState.localPhase !== 'SHOWING' || gameState.sequence.length === 0 || !isPlaying) return
 
         let i = 0
         const showNext = () => {
-            if (i < sequence.length) {
-                setShowingIndex(i)
+            if (i < gameState.sequence.length) {
+                updateGameState(state => ({ ...state, showingIndex: i }))
                 playTap()
                 setTimeout(() => {
-                    setShowingIndex(-1)
+                    updateGameState(state => ({ ...state, showingIndex: -1 }))
                     i++
                     setTimeout(showNext, 300)
                 }, 500)
             } else {
-                // Done showing, time for input
-                setPhase('INPUT')
-                setPlayerInput([])
                 inputRef.current = []
+                updateGameState(state => ({
+                    ...state,
+                    localPhase: 'INPUT' as const,
+                    playerInput: []
+                }))
             }
         }
 
         const timeout = setTimeout(showNext, 500)
         return () => clearTimeout(timeout)
-    }, [phase, sequence])
+    }, [gameState.localPhase, gameState.sequence, isPlaying, updateGameState])
 
-    // Listen for broadcasts
-    useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'MEMORY_NEW_ROUND') {
-            setRound(lastBroadcast.round)
-            setSequence(lastBroadcast.sequence)
-            setPhase('SHOWING')
-            setRoundResults(new Map())
-            setPlayerInput([])
-            inputRef.current = []
-        }
-
-        if (lastBroadcast.type === 'MEMORY_PLAYER_RESULT') {
-            let nextRoundResults: Map<string, boolean> | null = null
-            let nextAlivePlayers: Set<string> | null = null
-
-            setRoundResults(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.correct)
-                nextRoundResults = next
-                return next
-            })
-
-            setAlivePlayers(prev => {
-                const next = new Set(prev)
-                if (!lastBroadcast.correct) {
-                    next.delete(lastBroadcast.playerId)
-                }
-                nextAlivePlayers = next
-                return next
-            })
-
-            // Host checks if round should end
-            if (isHost && nextRoundResults && nextAlivePlayers) {
-                // Check if all currently alive players have a success result
-                // Or if everyone is dead
-                const allAliveFinished = [...nextAlivePlayers].every(id => nextRoundResults?.get(id) === true)
-
-                if (allAliveFinished || (nextAlivePlayers as Set<string>).size === 0) {
-                    setTimeout(() => {
-                        broadcastAndApply({
-                            type: 'MEMORY_ROUND_END',
-                            round: round,
-                            alivePlayers: [...(nextAlivePlayers || [])]
-                        })
-                    }, 500)
-                }
-            }
-        }
-
-        if (lastBroadcast.type === 'MEMORY_ROUND_END') {
-            setPhase('RESULT')
-
-            // Check for game over conditions
-            const alive = new Set<string>(lastBroadcast.alivePlayers)
-            setAlivePlayers(alive)
-
-            if (alive.size <= 1 || lastBroadcast.round >= MAX_LENGTH) {
-                // Game over!
-                const winnerId = alive.size === 1
-                    ? [...alive][0]
-                    : [...alive][0] // Tie goes to first
-
-                setTimeout(() => {
-                    broadcastAndApply({
-                        type: 'MEMORY_GAME_OVER',
-                        winnerId
-                    })
-                }, 1500)
-            } else {
-                // Next round
-                if (isHost) {
-                    setTimeout(() => {
-                        startNewRound(lastBroadcast.round + 1, STARTING_LENGTH + lastBroadcast.round)
-                    }, 2000)
-                }
-            }
-        }
-
-        if (lastBroadcast.type === 'MEMORY_GAME_OVER') {
-            setWinner(lastBroadcast.winnerId)
-            setPhase('ENDED')
-
-            if (lastBroadcast.winnerId === currentPlayer?.id) {
-                playWinFanfare()
-            }
-
-            if (isHost) {
-                setTimeout(() => {
-                    onGameEnd({ winnerId: lastBroadcast.winnerId })
-                }, 3000)
-            }
-        }
-    }, [lastBroadcast, isHost, currentPlayer?.id, startNewRound, onGameEnd, broadcastAndApply])
-
-    // Handle button press
     const handleButtonPress = useCallback((buttonIndex: number) => {
-        if (phase !== 'INPUT' || !currentPlayer || !isAlive) return
+        if (gameState.localPhase !== 'INPUT' || !currentPlayerId || !isAlive || winnerId) return
 
         playTap()
-        setFlashButton(buttonIndex)
-        setTimeout(() => setFlashButton(null), 100)
+        updateGameState(state => ({ ...state, flashButton: buttonIndex }))
+        setTimeout(() => updateGameState(state => ({ ...state, flashButton: null })), 100)
 
         inputRef.current = [...inputRef.current, buttonIndex]
-        setPlayerInput([...inputRef.current])
-
         const currentPos = inputRef.current.length - 1
-        const isCorrect = sequence[currentPos] === buttonIndex
+        const isCorrect = gameState.sequence[currentPos] === buttonIndex
+
+        updateGameState(state => ({ ...state, playerInput: [...inputRef.current] }))
 
         if (!isCorrect) {
-            // Wrong! Player is out
             playFail()
-            broadcastAndApply({
-                type: 'MEMORY_PLAYER_RESULT',
-                playerId: currentPlayer.id,
-                correct: false
-            })
-        } else if (inputRef.current.length === sequence.length) {
-            // Completed sequence correctly!
-            broadcastAndApply({
-                type: 'MEMORY_PLAYER_RESULT',
-                playerId: currentPlayer.id,
-                correct: true
-            })
+            updateGameState(state => ({
+                ...state,
+                alivePlayers: new Set([...state.alivePlayers].filter(id => id !== currentPlayerId)),
+                roundResults: new Map([...state.roundResults, [currentPlayerId, false]])
+            }))
+            checkRoundEnd()
+        } else if (inputRef.current.length === gameState.sequence.length) {
+            updateGameState(state => ({
+                ...state,
+                roundResults: new Map([...state.roundResults, [currentPlayerId, true]])
+            }))
+            checkRoundEnd()
         }
-    }, [phase, currentPlayer, isAlive, sequence, round, alivePlayers, roundResults, isHost, broadcastAndApply])
+    }, [gameState, currentPlayerId, isAlive, winnerId, updateGameState])
+
+    const checkRoundEnd = useCallback(() => {
+        setTimeout(() => {
+            const alive = gameState.alivePlayers
+
+            if (alive.size <= 1 || gameState.round >= MAX_LENGTH) {
+                if (gameEndedRef.current) return
+                gameEndedRef.current = true
+
+                const winner = alive.size >= 1 ? [...alive][0] : null
+                playWinFanfare()
+                endGame(winner)
+            } else {
+                updateGameState(state => ({ ...state, localPhase: 'RESULT' as const }))
+                setTimeout(() => {
+                    startNewRound(gameState.round + 1, STARTING_LENGTH + gameState.round)
+                }, 2000)
+            }
+        }, 500)
+    }, [gameState.alivePlayers, gameState.round, updateGameState, startNewRound, endGame])
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-indigo-900 to-black select-none p-4">
-            {/* Header */}
-            <div className="text-center pt-4">
-                <h1 className="text-3xl md:text-4xl font-pixel text-white mb-2"
-                    style={{ textShadow: '0 0 15px #FF00FF' }}>
-                    MEMORY FLASH!
-                </h1>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-indigo-900 to-black"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4">
+                <div className="text-center pt-4">
+                    <h1 className="text-3xl md:text-4xl font-pixel text-white mb-2"
+                        style={{ textShadow: '0 0 15px #FF00FF' }}>
+                        MEMORY FLASH!
+                    </h1>
 
-                {phase === 'COUNTDOWN' && (
-                    <motion.div
-                        key={countdown}
-                        initial={{ scale: 2, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        className="text-7xl md:text-8xl font-pixel text-atari-yellow mt-8"
-                        style={{ textShadow: '0 0 30px #FFD700' }}
-                    >
-                        {countdown}
-                    </motion.div>
-                )}
+                    {isPlaying && (
+                        <div className="text-lg text-white/70">
+                            Round {gameState.round} - {gameState.sequence.length} colors
+                        </div>
+                    )}
 
-                {phase !== 'COUNTDOWN' && phase !== 'ENDED' && (
-                    <div className="text-lg text-white/70">
-                        Round {round} - {sequence.length} colors
-                    </div>
-                )}
+                    {gameState.localPhase === 'SHOWING' && isPlaying && (
+                        <div className="text-xl text-atari-cyan mt-4 animate-pulse">WATCH THE SEQUENCE...</div>
+                    )}
 
-                {phase === 'SHOWING' && (
-                    <div className="text-xl text-atari-cyan mt-4 animate-pulse">
-                        WATCH THE SEQUENCE...
-                    </div>
-                )}
+                    {gameState.localPhase === 'INPUT' && isAlive && isPlaying && (
+                        <div className="text-xl text-atari-green mt-4">
+                            YOUR TURN! ({gameState.playerInput.length}/{gameState.sequence.length})
+                        </div>
+                    )}
 
-                {phase === 'INPUT' && isAlive && (
-                    <div className="text-xl text-atari-green mt-4">
-                        YOUR TURN! ({playerInput.length}/{sequence.length})
-                    </div>
-                )}
-
-                {phase === 'INPUT' && !isAlive && (
-                    <div className="text-xl text-red-400 mt-4">
-                        YOU'RE OUT - WATCHING...
-                    </div>
-                )}
-            </div>
-
-            {/* Button grid */}
-            <div className="flex-1 flex items-center justify-center">
-                <div className="grid grid-cols-2 gap-4 w-64 h-64 md:w-80 md:h-80">
-                    {COLORS.map((color, idx) => (
-                        <motion.button
-                            key={idx}
-                            whileTap={{ scale: 0.9 }}
-                            onClick={() => handleButtonPress(idx)}
-                            disabled={phase !== 'INPUT' || !isAlive}
-                            className={clsx(
-                                "rounded-xl transition-all duration-100",
-                                (phase !== 'INPUT' || !isAlive) && "cursor-not-allowed"
-                            )}
-                            style={{
-                                backgroundColor: color,
-                                opacity: showingIndex === idx || flashButton === idx ? 1 : 0.4,
-                                boxShadow: showingIndex === idx || flashButton === idx
-                                    ? `0 0 30px ${color}`
-                                    : '0 4px 0 rgba(0,0,0,0.5)',
-                                transform: showingIndex === idx ? 'scale(1.1)' : 'scale(1)'
-                            }}
-                        >
-                            <span className="text-4xl">{BUTTON_LABELS[idx]}</span>
-                        </motion.button>
-                    ))}
+                    {gameState.localPhase === 'INPUT' && !isAlive && isPlaying && (
+                        <div className="text-xl text-red-400 mt-4">YOU'RE OUT - WATCHING...</div>
+                    )}
                 </div>
-            </div>
 
-            {/* Player status */}
-            <div className="w-full max-w-md pb-4">
-                <div className="flex flex-wrap justify-center gap-2">
-                    {players.map(player => {
-                        const alive = alivePlayers.has(player.id)
-                        const result = roundResults.get(player.id)
-                        const isMe = player.id === currentPlayer?.id
-
-                        return (
-                            <div
-                                key={player.id}
+                <div className="flex-1 flex items-center justify-center">
+                    <div className="grid grid-cols-2 gap-4 w-64 h-64 md:w-80 md:h-80">
+                        {COLORS.map((color, idx) => (
+                            <motion.button
+                                key={idx}
+                                whileTap={{ scale: 0.9 }}
+                                onClick={() => handleButtonPress(idx)}
+                                disabled={gameState.localPhase !== 'INPUT' || !isAlive}
                                 className={clsx(
-                                    "px-3 py-1 rounded-lg text-sm",
-                                    !alive && "line-through opacity-50",
-                                    isMe ? "border-2 border-atari-green" : "border border-white/20",
-                                    result === true && "bg-green-800",
-                                    result === false && "bg-red-800",
-                                    result === undefined && alive && "bg-white/10"
+                                    "rounded-xl transition-all duration-100",
+                                    (gameState.localPhase !== 'INPUT' || !isAlive) && "cursor-not-allowed"
                                 )}
+                                style={{
+                                    backgroundColor: color,
+                                    opacity: gameState.showingIndex === idx || gameState.flashButton === idx ? 1 : 0.4,
+                                    boxShadow: gameState.showingIndex === idx || gameState.flashButton === idx
+                                        ? `0 0 30px ${color}`
+                                        : '0 4px 0 rgba(0,0,0,0.5)',
+                                    transform: gameState.showingIndex === idx ? 'scale(1.1)' : 'scale(1)'
+                                }}
                             >
-                                <span className="text-white">{player.username}</span>
-                                {result === true && <span className="ml-1">✓</span>}
-                                {result === false && <span className="ml-1">✗</span>}
-                            </div>
-                        )
-                    })}
+                                <span className="text-4xl">{BUTTON_LABELS[idx]}</span>
+                            </motion.button>
+                        ))}
+                    </div>
+                </div>
+
+                <div className="w-full max-w-md pb-4">
+                    <div className="flex flex-wrap justify-center gap-2">
+                        {players.map(player => {
+                            const alive = gameState.alivePlayers.has(player.id)
+                            const result = gameState.roundResults.get(player.id)
+                            const isMe = player.id === currentPlayerId
+
+                            return (
+                                <div
+                                    key={player.id}
+                                    className={clsx(
+                                        "px-3 py-1 rounded-lg text-sm",
+                                        !alive && "line-through opacity-50",
+                                        isMe ? "border-2 border-atari-green" : "border border-white/20",
+                                        result === true && "bg-green-800",
+                                        result === false && "bg-red-800",
+                                        result === undefined && alive && "bg-white/10"
+                                    )}
+                                >
+                                    <span className="text-white">{player.username}</span>
+                                    {result === true && <span className="ml-1">✓</span>}
+                                    {result === false && <span className="ml-1">✗</span>}
+                                </div>
+                            )
+                        })}
+                    </div>
                 </div>
             </div>
-
-            {/* Winner display */}
-            <AnimatePresence>
-                {phase === 'ENDED' && winner && (
-                    <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        className="absolute inset-0 flex items-center justify-center bg-black/80"
-                    >
-                        <motion.div
-                            initial={{ scale: 0 }}
-                            animate={{ scale: 1 }}
-                            className="text-center"
-                        >
-                            <div className="text-6xl mb-4">🧠</div>
-                            <div className="text-4xl font-pixel text-atari-green">
-                                {players.find(p => p.id === winner)?.username} WINS!
-                            </div>
-                        </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
-        </div>
+        </MinigameWrapper>
     )
 }
 

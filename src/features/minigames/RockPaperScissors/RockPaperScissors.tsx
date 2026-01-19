@@ -1,11 +1,14 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * RockPaperScissors - Classic game!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
+
+import { useCallback, useEffect, useRef } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, playFail, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'CHOOSING' | 'REVEAL' | 'ENDED'
 type Choice = 'rock' | 'paper' | 'scissors' | null
 
 const CHOICES: { id: Choice; emoji: string; beats: Choice }[] = [
@@ -16,285 +19,262 @@ const CHOICES: { id: Choice; emoji: string; beats: Choice }[] = [
 
 const TOTAL_ROUNDS = 5
 
-const RockPaperScissors: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface RPSState {
+    round: number
+    localPhase: 'CHOOSING' | 'REVEAL'
+    myChoice: Choice
+    choices: Map<string, Choice>
+    scores: Map<string, number>
+    roundResult: string | null
+    chooseCountdown: number
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [round, setRound] = useState(0)
-    const [myChoice, setMyChoice] = useState<Choice>(null)
-    const [choices, setChoices] = useState<Map<string, Choice>>(new Map())
-    const [scores, setScores] = useState<Map<string, number>>(new Map(players.map(p => [p.id, 0])))
-    const [roundResult, setRoundResult] = useState<string | null>(null)
-    const [winner, setWinner] = useState<string | null>(null)
-    const [chooseCountdown, setChooseCountdown] = useState(5)
-
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const isHostRef = useRef(isHost)
-    isHostRef.current = isHost
-
-    // Unlock audio
-    useEffect(() => {
-        const handleInteraction = () => {
-            unlockAudio()
-            window.removeEventListener('pointerdown', handleInteraction)
+const RockPaperScissors = () => {
+    const engine = useMinigameEngine<RPSState>({
+        config: { countdownDuration: 3 },
+        initialGameState: {
+            round: 0,
+            localPhase: 'CHOOSING',
+            myChoice: null,
+            choices: new Map(),
+            scores: new Map(),
+            roundResult: null,
+            chooseCountdown: 5
         }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+    })
 
-    // Initial countdown
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        endGame,
+        updateGameState
+    } = engine
+
+    const gameEndedRef = useRef(false)
+    const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+    // Initialize scores
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
+        if (players.length > 0 && gameState.scores.size === 0) {
+            updateGameState(state => ({
+                ...state,
+                scores: new Map(players.map(p => [p.id, 0]))
+            }))
+        }
+    }, [players, gameState.scores.size, updateGameState])
 
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    playCountdownBeep(true)
-                    if (isHostRef.current) startNewRound()
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
-
-        return () => clearInterval(interval)
-    }, [phase])
+    // Start first round
+    useEffect(() => {
+        if (isPlaying && gameState.round === 0) {
+            startNewRound()
+        }
+    }, [isPlaying, gameState.round])
 
     // Choosing countdown
     useEffect(() => {
-        if (phase !== 'CHOOSING') return
-        const interval = setInterval(() => {
-            setChooseCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    // If player didn't choose, auto-select random
-                    if (!myChoice && currentPlayer) {
+        if (gameState.localPhase !== 'CHOOSING' || !isPlaying) return
+
+        timerRef.current = setInterval(() => {
+            updateGameState(state => {
+                if (state.chooseCountdown <= 1) {
+                    if (timerRef.current) clearInterval(timerRef.current)
+                    // Auto-select random if not chosen
+                    if (!state.myChoice && currentPlayerId) {
                         const randomChoice = CHOICES[Math.floor(Math.random() * 3)].id
-                        handleChoice(randomChoice!)
+                        setTimeout(() => handleChoice(randomChoice!), 0)
                     }
-                    return 0
+                    return { ...state, chooseCountdown: 0 }
                 }
-                return prev - 1
+                return { ...state, chooseCountdown: state.chooseCountdown - 1 }
             })
         }, 1000)
-        return () => clearInterval(interval)
-    }, [phase, myChoice, currentPlayer])
+
+        return () => {
+            if (timerRef.current) clearInterval(timerRef.current)
+        }
+    }, [gameState.localPhase, isPlaying, currentPlayerId])
 
     const startNewRound = useCallback(() => {
-        const newRound = round + 1
+        const newRound = gameState.round + 1
+
         if (newRound > TOTAL_ROUNDS) {
-            const sortedScores = [...scores.entries()].sort((a, b) => b[1] - a[1])
-            const winnerId = sortedScores[0]?.[0]
-            broadcastAndApply({ type: 'RPS_GAME_OVER', winnerId })
+            if (gameEndedRef.current) return
+            gameEndedRef.current = true
+
+            const sortedScores = Array.from(gameState.scores.entries())
+                .sort(([, a], [, b]) => b - a)
+            const topWinner = sortedScores[0]?.[0] || null
+
+            playWinFanfare()
+            endGame(topWinner)
             return
         }
-        broadcastAndApply({ type: 'RPS_NEW_ROUND', round: newRound })
-    }, [round, scores, broadcastAndApply])
+
+        updateGameState(() => ({
+            round: newRound,
+            localPhase: 'CHOOSING' as const,
+            myChoice: null,
+            choices: new Map(),
+            roundResult: null,
+            chooseCountdown: 5,
+            scores: gameState.scores
+        }))
+    }, [gameState.round, gameState.scores, updateGameState, endGame])
 
     const handleChoice = useCallback((choice: Choice) => {
-        if (phase !== 'CHOOSING' || !currentPlayer || myChoice) return
+        if (gameState.localPhase !== 'CHOOSING' || !currentPlayerId || gameState.myChoice || winnerId) return
 
-        setMyChoice(choice)
         playTap()
-        broadcastAndApply({
-            type: 'RPS_CHOOSE',
-            playerId: currentPlayer.id,
-            choice
+        updateGameState(state => {
+            const newChoices = new Map([...state.choices, [currentPlayerId, choice]])
+
+            // Check if all players chose
+            if (newChoices.size === players.length) {
+                setTimeout(() => revealChoices(newChoices), 500)
+            }
+
+            return { ...state, myChoice: choice, choices: newChoices }
         })
-    }, [phase, currentPlayer, myChoice, broadcastAndApply])
+    }, [gameState.localPhase, gameState.myChoice, currentPlayerId, players.length, winnerId, updateGameState])
 
-    // Listen for broadcasts
-    useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'RPS_NEW_ROUND') {
-            setRound(lastBroadcast.round)
-            setPhase('CHOOSING')
-            setMyChoice(null)
-            setChoices(new Map())
-            setRoundResult(null)
-            setChooseCountdown(5)
-        }
-
-        if (lastBroadcast.type === 'RPS_CHOOSE') {
-            setChoices(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.choice)
-
-                // If all players have chosen, reveal
-                if (next.size === players.length && isHost) {
-                    setTimeout(() => {
-                        broadcastAndApply({ type: 'RPS_REVEAL', choices: Object.fromEntries(next) })
-                    }, 500)
-                }
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'RPS_REVEAL') {
-            setPhase('REVEAL')
-            const allChoices = new Map<string, Choice>(Object.entries(lastBroadcast.choices) as [string, Choice][])
-            setChoices(allChoices)
-
-            // Determine winner (for 2 players)
+    const revealChoices = useCallback((allChoices: Map<string, Choice>) => {
+        updateGameState(state => {
             const playerIds = [...allChoices.keys()]
+            let roundResult = 'TIE!'
+            let newScores = new Map(state.scores)
+
             if (playerIds.length === 2) {
                 const [p1, p2] = playerIds
                 const c1 = allChoices.get(p1)
                 const c2 = allChoices.get(p2)
-
                 const choice1 = CHOICES.find(c => c.id === c1)
 
-                if (c1 === c2) {
-                    setRoundResult('TIE!')
-                } else if (choice1?.beats === c2) {
-                    setRoundResult(`${players.find(p => p.id === p1)?.username} wins round!`)
-                    setScores(prev => {
-                        const next = new Map(prev)
-                        next.set(p1, (prev.get(p1) || 0) + 1)
-                        return next
-                    })
-                    playWinFanfare()
-                } else {
-                    setRoundResult(`${players.find(p => p.id === p2)?.username} wins round!`)
-                    setScores(prev => {
-                        const next = new Map(prev)
-                        next.set(p2, (prev.get(p2) || 0) + 1)
-                        return next
-                    })
-                    if (p2 === currentPlayer?.id) playWinFanfare()
-                    else playFail()
+                if (c1 !== c2) {
+                    if (choice1?.beats === c2) {
+                        roundResult = `${players.find(p => p.id === p1)?.username} wins round!`
+                        newScores.set(p1, (newScores.get(p1) || 0) + 1)
+                        if (p1 === currentPlayerId) playWinFanfare()
+                        else playFail()
+                    } else {
+                        roundResult = `${players.find(p => p.id === p2)?.username} wins round!`
+                        newScores.set(p2, (newScores.get(p2) || 0) + 1)
+                        if (p2 === currentPlayerId) playWinFanfare()
+                        else playFail()
+                    }
                 }
             }
 
-            if (isHost) {
-                setTimeout(() => startNewRound(), 2500)
-            }
-        }
-
-        if (lastBroadcast.type === 'RPS_GAME_OVER') {
-            setPhase('ENDED')
-            setWinner(lastBroadcast.winnerId)
-            if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-            if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-        }
-    }, [lastBroadcast, players, isHost, currentPlayer?.id, startNewRound, onGameEnd, broadcastAndApply])
+            setTimeout(startNewRound, 2500)
+            return { ...state, localPhase: 'REVEAL' as const, roundResult, scores: newScores }
+        })
+    }, [players, currentPlayerId, updateGameState, startNewRound])
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-purple-900 to-black select-none p-4">
-            {/* Header */}
-            <div className="text-center pt-4">
-                <h1 className="text-3xl md:text-4xl font-pixel text-white mb-2" style={{ textShadow: '0 0 15px #FF00FF' }}>
-                    ✊ ROCK PAPER SCISSORS!
-                </h1>
-                {phase !== 'COUNTDOWN' && phase !== 'ENDED' && (
-                    <div className="text-lg text-white/70">Round {round} / {TOTAL_ROUNDS}</div>
-                )}
-            </div>
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-purple-900 to-black"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4">
+                <div className="text-center pt-4">
+                    <h1 className="text-3xl md:text-4xl font-pixel text-white mb-2"
+                        style={{ textShadow: '0 0 15px #FF00FF' }}>
+                        ✊ ROCK PAPER SCISSORS!
+                    </h1>
+                    {isPlaying && (
+                        <div className="text-lg text-white/70">Round {gameState.round} / {TOTAL_ROUNDS}</div>
+                    )}
+                </div>
 
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">
-                    {countdown}
-                </motion.div>
-            )}
-
-            {/* Choice area */}
-            <div className="flex-1 flex flex-col items-center justify-center">
-                {phase === 'CHOOSING' && (
-                    <>
-                        <div className="text-2xl text-yellow-400 mb-6">
-                            Choose in {chooseCountdown}...
-                        </div>
-                        <div className="flex gap-4">
-                            {CHOICES.map(choice => (
-                                <motion.button
-                                    key={choice.id}
-                                    whileHover={{ scale: 1.1 }}
-                                    whileTap={{ scale: 0.9 }}
-                                    onClick={() => handleChoice(choice.id)}
-                                    disabled={!!myChoice}
-                                    className={clsx(
-                                        "w-24 h-24 md:w-32 md:h-32 rounded-xl text-5xl md:text-6xl transition-all",
-                                        myChoice === choice.id
-                                            ? "bg-green-600 border-4 border-green-400"
-                                            : myChoice
-                                                ? "bg-gray-700 opacity-50"
-                                                : "bg-purple-700 hover:bg-purple-600"
-                                    )}
-                                >
-                                    {choice.emoji}
-                                </motion.button>
-                            ))}
-                        </div>
-                        {myChoice && (
-                            <div className="mt-4 text-green-400">Waiting for opponent...</div>
-                        )}
-                    </>
-                )}
-
-                {phase === 'REVEAL' && (
-                    <div className="text-center">
-                        <div className="flex gap-8 mb-6">
-                            {players.map(player => {
-                                const choice = choices.get(player.id)
-                                const choiceData = CHOICES.find(c => c.id === choice)
-                                return (
-                                    <motion.div
-                                        key={player.id}
-                                        initial={{ scale: 0, rotate: -180 }}
-                                        animate={{ scale: 1, rotate: 0 }}
-                                        className="text-center"
+                <div className="flex-1 flex flex-col items-center justify-center">
+                    {gameState.localPhase === 'CHOOSING' && isPlaying && (
+                        <>
+                            <div className="text-2xl text-yellow-400 mb-6">
+                                Choose in {gameState.chooseCountdown}...
+                            </div>
+                            <div className="flex gap-4">
+                                {CHOICES.map(choice => (
+                                    <motion.button
+                                        key={choice.id}
+                                        whileHover={{ scale: 1.1 }}
+                                        whileTap={{ scale: 0.9 }}
+                                        onClick={() => handleChoice(choice.id)}
+                                        disabled={!!gameState.myChoice}
+                                        className={clsx(
+                                            "w-24 h-24 md:w-32 md:h-32 rounded-xl text-5xl md:text-6xl transition-all",
+                                            gameState.myChoice === choice.id
+                                                ? "bg-green-600 border-4 border-green-400"
+                                                : gameState.myChoice
+                                                    ? "bg-gray-700 opacity-50"
+                                                    : "bg-purple-700 hover:bg-purple-600"
+                                        )}
                                     >
-                                        <div className="text-sm text-white/70 mb-2">{player.username}</div>
-                                        <div className="text-6xl md:text-8xl">{choiceData?.emoji || '❓'}</div>
-                                    </motion.div>
-                                )
-                            })}
-                        </div>
-                        {roundResult && (
-                            <motion.div
-                                initial={{ scale: 0 }}
-                                animate={{ scale: 1 }}
-                                className="text-2xl font-pixel text-yellow-400"
-                            >
-                                {roundResult}
-                            </motion.div>
-                        )}
-                    </div>
-                )}
-            </div>
+                                        {choice.emoji}
+                                    </motion.button>
+                                ))}
+                            </div>
+                            {gameState.myChoice && (
+                                <div className="mt-4 text-green-400">Waiting for opponent...</div>
+                            )}
+                        </>
+                    )}
 
-            {/* Scores */}
-            <div className="flex gap-4 pb-4">
-                {players.map(player => (
-                    <div
-                        key={player.id}
-                        className={clsx(
-                            "text-center px-4 py-2 rounded-lg",
-                            player.id === currentPlayer?.id ? "bg-purple-700 border border-purple-400" : "bg-white/10"
-                        )}
-                    >
-                        <div className="text-sm text-white/70">{player.username}</div>
-                        <div className="text-2xl font-pixel text-pink-400">{scores.get(player.id) || 0}</div>
-                    </div>
-                ))}
-            </div>
-
-            {/* Winner */}
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🏆</div>
-                        <div className="text-4xl font-pixel text-pink-400">
-                            {players.find(p => p.id === winner)?.username} WINS!
+                    {gameState.localPhase === 'REVEAL' && isPlaying && (
+                        <div className="text-center">
+                            <div className="flex gap-8 mb-6">
+                                {players.map(player => {
+                                    const choice = gameState.choices.get(player.id)
+                                    const choiceData = CHOICES.find(c => c.id === choice)
+                                    return (
+                                        <motion.div
+                                            key={player.id}
+                                            initial={{ scale: 0, rotate: -180 }}
+                                            animate={{ scale: 1, rotate: 0 }}
+                                            className="text-center"
+                                        >
+                                            <div className="text-sm text-white/70 mb-2">{player.username}</div>
+                                            <div className="text-6xl md:text-8xl">{choiceData?.emoji || '❓'}</div>
+                                        </motion.div>
+                                    )
+                                })}
+                            </div>
+                            {gameState.roundResult && (
+                                <motion.div
+                                    initial={{ scale: 0 }}
+                                    animate={{ scale: 1 }}
+                                    className="text-2xl font-pixel text-yellow-400"
+                                >
+                                    {gameState.roundResult}
+                                </motion.div>
+                            )}
                         </div>
-                    </div>
-                </motion.div>
-            )}
-        </div>
+                    )}
+                </div>
+
+                <div className="flex gap-4 pb-4">
+                    {players.map(player => (
+                        <div
+                            key={player.id}
+                            className={clsx(
+                                "text-center px-4 py-2 rounded-lg",
+                                player.id === currentPlayerId ? "bg-purple-700 border border-purple-400" : "bg-white/10"
+                            )}
+                        >
+                            <div className="text-sm text-white/70">{player.username}</div>
+                            <div className="text-2xl font-pixel text-pink-400">
+                                {gameState.scores.get(player.id) || 0}
+                            </div>
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </MinigameWrapper>
     )
 }
 

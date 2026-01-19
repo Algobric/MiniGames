@@ -1,228 +1,288 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
-import { motion } from 'framer-motion'
-import { playTap, playCountdownBeep, playWinFanfare, unlockAudio } from '../HighNoon/sounds'
+/**
+ * SlimePong - Classic Pong with slimes!
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ */
 
-type Phase = 'COUNTDOWN' | 'PLAYING' | 'ENDED'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useMinigameEngine, MinigameWrapper } from '../../../engine'
+import { motion } from 'framer-motion'
+import { playWinFanfare } from '../HighNoon/sounds'
 
 const ARENA_WIDTH = 300
 const ARENA_HEIGHT = 200
 const PADDLE_HEIGHT = 50
 const PADDLE_WIDTH = 10
 const BALL_SIZE = 10
-const BALL_SPEED = 4
+const BALL_SPEED = 120 // Pixels per second
 const WIN_SCORE = 5
 
-const SlimePong: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
+interface PongState {
+    ball: { x: number, y: number, vx: number, vy: number, lastUpdate: number }
+    paddles: number[] // [y1, y2]
+    scores: number[] // [s1, s2]
+}
 
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [paddleY, setPaddleY] = useState<[number, number]>([ARENA_HEIGHT / 2, ARENA_HEIGHT / 2])
-    const [ballPos, setBallPos] = useState({ x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2 })
-    const [ballVel, setBallVel] = useState({ x: BALL_SPEED, y: BALL_SPEED / 2 })
-    const [scores, setScores] = useState<[number, number]>([0, 0])
-    const [winner, setWinner] = useState<string | null>(null)
+const SlimePong = () => {
+    const engine = useMinigameEngine<PongState>({
+        config: {
+            countdownDuration: 3,
+            gameDuration: 120 // 2 minutes max?
+        },
+        initialGameState: {
+            ball: { x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2, vx: BALL_SPEED, vy: BALL_SPEED * 0.5, lastUpdate: Date.now() },
+            paddles: [ARENA_HEIGHT / 2, ARENA_HEIGHT / 2],
+            scores: [0, 0]
+        }
+    })
 
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
-    const myIndex = players.findIndex(p => p.id === currentPlayer?.id)
+    const {
+        phase,
+        countdown,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        updateGameState,
+        endGame
+    } = engine
+
+    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const myIndex = players.findIndex(p => p.id === currentPlayerId)
+
+    // Internal generic timestamp for delta calculations
+    // We use Date.now() but relative to game? 
+    // Just use standard Date.now() for local loops.
+    // Leader writes Date.now() to state. Clients read it. 
+    // If clocks differ, position shifts. 
+    // Better: use `performance.now()` relative to mount? No, not synced.
+    // We'll stick to Date.now() for simplicity and assume roughly synced clocks (<1s).
+
     const gameLoopRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const [localBall, setLocalBall] = useState({ x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2 })
 
+    // Leader Physics Loop
     useEffect(() => {
-        const handleInteraction = () => { unlockAudio(); window.removeEventListener('pointerdown', handleInteraction) }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
-
-    useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) { clearInterval(interval); playCountdownBeep(true); setPhase('PLAYING'); return 0 }
-                playCountdownBeep(false); return prev - 1
-            })
-        }, 1000)
-        return () => clearInterval(interval)
-    }, [phase])
-
-    // Game physics loop (host only)
-    useEffect(() => {
-        if (phase !== 'PLAYING' || !isHost) return
+        if (!isPlaying || !isLeader || winnerId || players.length < 2) return
 
         gameLoopRef.current = setInterval(() => {
-            setBallPos(prev => {
-                let newX = prev.x + ballVel.x
-                let newY = prev.y + ballVel.y
-                let newVelX = ballVel.x
-                let newVelY = ballVel.y
+            updateGameState(state => {
+                const now = Date.now()
+                const dt = (now - state.ball.lastUpdate) / 1000
+                if (dt <= 0) return state
 
-                // Top/bottom bounce
-                if (newY <= 0 || newY >= ARENA_HEIGHT) {
-                    newVelY = -newVelY
-                    newY = Math.max(0, Math.min(ARENA_HEIGHT, newY))
+                let { x, y, vx, vy } = state.ball
+
+                // Move
+                x += vx * dt
+                y += vy * dt
+
+                let newVx = vx
+                let newVy = vy
+                let scored = false
+                const newScores = [...state.scores]
+
+                // Wall Collisions (Top/Bottom)
+                if (y <= 0) { y = 0; newVy = Math.abs(vy) }
+                else if (y >= ARENA_HEIGHT) { y = ARENA_HEIGHT; newVy = -Math.abs(vy) }
+
+                // Paddle Collisions
+                // Left Paddle
+                if (x <= PADDLE_WIDTH + 5) {
+                    const paddleY = state.paddles[0]
+                    if (y >= paddleY - PADDLE_HEIGHT / 2 - 5 && y <= paddleY + PADDLE_HEIGHT / 2 + 5) {
+                        newVx = Math.abs(vx)
+                        x = PADDLE_WIDTH + 6
+                    } else if (x < 0) {
+                        // Score for P2
+                        newScores[1]++
+                        scored = true
+                    }
                 }
-
-                // Left paddle collision
-                if (newX <= PADDLE_WIDTH + 5) {
-                    const paddleTop = paddleY[0] - PADDLE_HEIGHT / 2
-                    const paddleBottom = paddleY[0] + PADDLE_HEIGHT / 2
-                    if (newY >= paddleTop && newY <= paddleBottom) {
-                        newVelX = Math.abs(newVelX)
-                        newX = PADDLE_WIDTH + 5
-                        playTap()
+                // Right Paddle
+                if (x >= ARENA_WIDTH - PADDLE_WIDTH - 5) {
+                    const paddleY = state.paddles[1]
+                    if (y >= paddleY - PADDLE_HEIGHT / 2 - 5 && y <= paddleY + PADDLE_HEIGHT / 2 + 5) {
+                        newVx = -Math.abs(vx)
+                        x = ARENA_WIDTH - PADDLE_WIDTH - 6
+                    } else if (x > ARENA_WIDTH) {
+                        // Score for P1
+                        newScores[0]++
+                        scored = true
                     }
                 }
 
-                // Right paddle collision
-                if (newX >= ARENA_WIDTH - PADDLE_WIDTH - 5) {
-                    const paddleTop = paddleY[1] - PADDLE_HEIGHT / 2
-                    const paddleBottom = paddleY[1] + PADDLE_HEIGHT / 2
-                    if (newY >= paddleTop && newY <= paddleBottom) {
-                        newVelX = -Math.abs(newVelX)
-                        newX = ARENA_WIDTH - PADDLE_WIDTH - 5
-                        playTap()
-                    }
+                if (scored) {
+                    // Reset Ball
+                    x = ARENA_WIDTH / 2
+                    y = ARENA_HEIGHT / 2
+                    newVx = (Math.random() > 0.5 ? 1 : -1) * BALL_SPEED
+                    newVy = (Math.random() - 0.5) * BALL_SPEED
                 }
 
-                // Score
-                if (newX <= 0 || newX >= ARENA_WIDTH) {
-                    const scorer = newX <= 0 ? 1 : 0
-                    const newScores: [number, number] = [...scores] as [number, number]
-                    newScores[scorer]++
-
-                    broadcastAndApply({
-                        type: 'PONG_SCORE',
-                        scores: newScores,
-                        winnerId: newScores[scorer] >= WIN_SCORE ? players[scorer]?.id : null
-                    })
-
-                    // Reset ball
-                    return { x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2 }
+                // Check Win
+                if (newScores.some(s => s >= WIN_SCORE)) {
+                    // Will be handled by effect
                 }
 
-                setBallVel({ x: newVelX, y: newVelY })
-                broadcastAndApply({ type: 'PONG_BALL', x: newX, y: newY, vx: newVelX, vy: newVelY })
-                return { x: newX, y: newY }
+                return {
+                    ...state,
+                    ball: {
+                        x, y, vx: newVx, vy: newVy, lastUpdate: now
+                    },
+                    scores: newScores
+                }
             })
-        }, 30)
+        }, 50) // 20 FPS Physics Update
 
         return () => { if (gameLoopRef.current) clearInterval(gameLoopRef.current) }
-    }, [phase, isHost, ballVel, paddleY, scores, players, broadcastAndApply])
+    }, [isPlaying, isLeader, players.length, updateGameState, winnerId])
 
+
+    // Client-side smoothing / prediction
     useEffect(() => {
-        if (!lastBroadcast) return
+        if (!isPlaying) return
 
-        if (lastBroadcast.type === 'PONG_BALL') {
-            setBallPos({ x: lastBroadcast.x, y: lastBroadcast.y })
-            setBallVel({ x: lastBroadcast.vx, y: lastBroadcast.vy })
+        let animationFrame: number
+        const animate = () => {
+            const now = Date.now()
+            const timeSinceUpdate = (now - gameState.ball.lastUpdate) / 1000
+
+            // Extrapolate current position from last server state
+            // This assumes constant velocity (no bounce processing locally for simplicity, 
+            // the server update will correct it)
+            // For smoother bounces, we could duplicate physics logic here.
+
+            let ex = gameState.ball.x + gameState.ball.vx * timeSinceUpdate
+            let ey = gameState.ball.y + gameState.ball.vy * timeSinceUpdate
+
+            // Simple client-side clamp to keep it inside visual bounds roughly
+            if (ey < 0) ey = 0
+            if (ey > ARENA_HEIGHT) ey = ARENA_HEIGHT
+
+            setLocalBall({ x: ex, y: ey })
+            animationFrame = requestAnimationFrame(animate)
         }
 
-        if (lastBroadcast.type === 'PONG_PADDLE') {
-            setPaddleY(prev => {
-                const next: [number, number] = [...prev] as [number, number]
-                next[lastBroadcast.playerIndex] = lastBroadcast.y
-                return next
-            })
-        }
+        animate()
+        return () => cancelAnimationFrame(animationFrame)
+    }, [gameState.ball, isPlaying])
 
-        if (lastBroadcast.type === 'PONG_SCORE') {
-            setScores(lastBroadcast.scores)
-            if (lastBroadcast.winnerId) {
-                setPhase('ENDED'); setWinner(lastBroadcast.winnerId)
-                if (lastBroadcast.winnerId === currentPlayer?.id) playWinFanfare()
-                if (isHost) setTimeout(() => onGameEnd({ winnerId: lastBroadcast.winnerId }), 3000)
-            }
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
 
+    // Win Condition Check
+    useEffect(() => {
+        if (!isPlaying || !isLeader || winnerId) return
+
+        if (gameState.scores[0] >= WIN_SCORE) {
+            playWinFanfare()
+            endGame(players[0]?.id)
+        } else if (gameState.scores[1] >= WIN_SCORE) {
+            playWinFanfare()
+            endGame(players[1]?.id)
+        }
+    }, [gameState.scores, isPlaying, isLeader, winnerId, players, endGame])
+
+
+    // Input Handling
     const handleMove = useCallback((direction: 'up' | 'down') => {
-        if (phase !== 'PLAYING' || myIndex < 0) return
+        if (!isPlaying || myIndex === -1) return
 
-        const currentY = paddleY[myIndex]
-        const newY = direction === 'up'
-            ? Math.max(PADDLE_HEIGHT / 2, currentY - 15)
-            : Math.min(ARENA_HEIGHT - PADDLE_HEIGHT / 2, currentY + 15)
+        updateGameState(state => {
+            const newPaddles = [...state.paddles]
+            const currentY = newPaddles[myIndex]
+            const newY = direction === 'up'
+                ? Math.max(PADDLE_HEIGHT / 2, currentY - 20)
+                : Math.min(ARENA_HEIGHT - PADDLE_HEIGHT / 2, currentY + 20)
 
-        setPaddleY(prev => {
-            const next: [number, number] = [...prev] as [number, number]
-            next[myIndex] = newY
-            return next
+            newPaddles[myIndex] = newY
+            return { ...state, paddles: newPaddles }
         })
+    }, [isPlaying, myIndex, updateGameState])
 
-        broadcastAndApply({ type: 'PONG_PADDLE', playerIndex: myIndex, y: newY })
-    }, [phase, myIndex, paddleY, broadcastAndApply])
-
-    const scale = 1.2
+    const scale = 1.0
 
     return (
-        <div className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-gray-900 to-black select-none p-4">
-            <div className="text-center pt-2">
-                <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>🏓 SLIME PONG!</h1>
-                <div className="text-2xl text-yellow-400 font-pixel">{scores[0]} - {scores[1]}</div>
-            </div>
-
-            {phase === 'COUNTDOWN' && (
-                <motion.div key={countdown} initial={{ scale: 2 }} animate={{ scale: 1 }} className="text-8xl font-pixel text-yellow-400">{countdown}</motion.div>
-            )}
-
-            {phase !== 'COUNTDOWN' && (
-                <div
-                    className="relative bg-green-900 border-4 border-green-700 rounded-lg"
-                    style={{ width: ARENA_WIDTH * scale, height: ARENA_HEIGHT * scale }}
-                >
-                    {/* Center line */}
-                    <div className="absolute left-1/2 top-0 h-full w-1 border-l-2 border-dashed border-white/30" />
-
-                    {/* Left paddle */}
-                    <motion.div
-                        animate={{ top: paddleY[0] * scale - (PADDLE_HEIGHT * scale) / 2 }}
-                        className="absolute left-1 rounded bg-red-500"
-                        style={{ width: PADDLE_WIDTH * scale, height: PADDLE_HEIGHT * scale }}
-                    />
-
-                    {/* Right paddle */}
-                    <motion.div
-                        animate={{ top: paddleY[1] * scale - (PADDLE_HEIGHT * scale) / 2 }}
-                        className="absolute right-1 rounded bg-blue-500"
-                        style={{ width: PADDLE_WIDTH * scale, height: PADDLE_HEIGHT * scale }}
-                    />
-
-                    {/* Ball */}
-                    <motion.div
-                        animate={{ left: ballPos.x * scale - BALL_SIZE, top: ballPos.y * scale - BALL_SIZE }}
-                        className="absolute bg-white rounded-full"
-                        style={{ width: BALL_SIZE * 2, height: BALL_SIZE * 2, boxShadow: '0 0 10px white' }}
-                    />
-
-                    {/* Player labels */}
-                    <div className="absolute -left-2 top-1/2 -translate-y-1/2 -rotate-90 text-xs text-red-400">{players[0]?.username}</div>
-                    <div className="absolute -right-2 top-1/2 -translate-y-1/2 rotate-90 text-xs text-blue-400">{players[1]?.username}</div>
-                </div>
-            )}
-
-            {/* Controls */}
-            {phase === 'PLAYING' && (
-                <div className="flex gap-8 pb-4">
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('up')}
-                        className="w-20 h-20 bg-gray-700 rounded-xl text-3xl">⬆️</motion.button>
-                    <motion.button whileTap={{ scale: 0.9 }} onClick={() => handleMove('down')}
-                        className="w-20 h-20 bg-gray-700 rounded-xl text-3xl">⬇️</motion.button>
-                </div>
-            )}
-
-            {phase === 'ENDED' && winner && (
-                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 bg-black/80 flex items-center justify-center">
-                    <div className="text-center">
-                        <div className="text-6xl mb-4">🏓</div>
-                        <div className="text-4xl font-pixel text-green-400">
-                            {players.find(p => p.id === winner)?.username} GANA!
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-gray-900 to-black"
+        >
+            <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
+                <div className="text-center pt-2">
+                    <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
+                        🏓 SLIME PONG!
+                    </h1>
+                    {isPlaying && (
+                        <div className="text-4xl text-yellow-400 font-pixel mt-2">
+                            {gameState.scores[0]} - {gameState.scores[1]}
                         </div>
-                        <div className="text-2xl text-white mt-2">{scores[0]} - {scores[1]}</div>
+                    )}
+                </div>
+
+                {isPlaying && players.length >= 2 && (
+                    <div
+                        className="relative bg-green-900 border-4 border-green-700 rounded-lg overflow-hidden shadow-[0_0_20px_rgba(0,255,0,0.2)]"
+                        style={{ width: ARENA_WIDTH * scale, height: ARENA_HEIGHT * scale }}
+                    >
+                        {/* Center Line */}
+                        <div className="absolute left-1/2 top-0 h-full w-0.5 border-l-2 border-dashed border-white/20" />
+
+                        {/* Paddles */}
+                        <motion.div
+                            className="absolute left-1 bg-red-500 rounded shadow-[0_0_10px_red]"
+                            animate={{ top: gameState.paddles[0] - PADDLE_HEIGHT / 2 }}
+                            style={{ width: PADDLE_WIDTH, height: PADDLE_HEIGHT }}
+                        />
+                        <motion.div
+                            className="absolute right-1 bg-blue-500 rounded shadow-[0_0_10px_blue]"
+                            animate={{ top: gameState.paddles[1] - PADDLE_HEIGHT / 2 }}
+                            style={{ width: PADDLE_WIDTH, height: PADDLE_HEIGHT }}
+                        />
+
+                        {/* Ball */}
+                        <div
+                            className="absolute bg-white rounded-full shadow-[0_0_15px_white]"
+                            style={{
+                                left: localBall.x - BALL_SIZE / 2,
+                                top: localBall.y - BALL_SIZE / 2,
+                                width: BALL_SIZE,
+                                height: BALL_SIZE
+                            }}
+                        />
+
+                        {/* Names */}
+                        <div className="absolute top-2 left-2 text-xs text-red-400 font-pixel">{players[0]?.username}</div>
+                        <div className="absolute top-2 right-2 text-xs text-blue-400 font-pixel text-right">{players[1]?.username}</div>
                     </div>
-                </motion.div>
-            )}
-        </div>
+                )}
+
+                {players.length < 2 && (
+                    <div className="text-white text-xl">Need 2 players to play Pong!</div>
+                )}
+
+                {/* Controls */}
+                {isPlaying && myIndex !== -1 && (
+                    <div className="flex gap-8 pb-8">
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleMove('up')}
+                            className="w-24 h-24 bg-gray-700 rounded-xl text-4xl shadow-lg border-b-4 border-gray-900 flex items-center justify-center"
+                        >
+                            ⬆️
+                        </motion.button>
+                        <motion.button
+                            whileTap={{ scale: 0.9 }}
+                            onPointerDown={() => handleMove('down')}
+                            className="w-24 h-24 bg-gray-700 rounded-xl text-4xl shadow-lg border-b-4 border-gray-900 flex items-center justify-center"
+                        >
+                            ⬇️
+                        </motion.button>
+                    </div>
+                )}
+
+            </div>
+        </MinigameWrapper>
     )
 }
 

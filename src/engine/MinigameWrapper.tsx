@@ -22,6 +22,7 @@ interface MinigameWrapperProps {
     winnerName?: string
     backgroundColor?: string
     showCountdown?: boolean
+    timeRemaining?: number | null
 }
 
 export function MinigameWrapper({
@@ -31,7 +32,8 @@ export function MinigameWrapper({
     winnerId,
     winnerName,
     backgroundColor = 'bg-atari-black',
-    showCountdown = true
+    showCountdown = true,
+    timeRemaining
 }: MinigameWrapperProps) {
     const { players, currentPlayer } = useGame()
     const [audioUnlocked, setAudioUnlocked] = useState(false)
@@ -139,6 +141,14 @@ export function MinigameWrapper({
             {!audioUnlocked && (
                 <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-white/50 text-sm animate-pulse z-10">
                     Tap anywhere to enable sound
+                </div>
+            )}
+
+            {timeRemaining !== undefined && timeRemaining !== null && (
+                <div className="absolute top-4 right-4 z-40 px-3 py-1 bg-black/50 rounded-lg border border-white/20">
+                    <div className="font-pixel text-xl text-white">
+                        {(timeRemaining / 1000).toFixed(1)}s
+                    </div>
                 </div>
             )}
 
