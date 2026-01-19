@@ -1,313 +1,168 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
-import type { MinigameProps } from '../../../types'
-import { useGame } from '../../../context/GameContext'
+/**
+ * ButtonMash - Tap as fast as you can!
+ * 
+ * REFACTORED TO USE THE NEW GAME ENGINE.
+ * No more host/guest distinction in game logic!
+ */
+
+import { useCallback, useRef, useEffect } from 'react'
+import { useMinigameEngine, MinigameWrapper, PlayerScoreBar } from '../../../engine'
 import { motion } from 'framer-motion'
-import clsx from 'clsx'
-import { playTap, playCountdownBeep, playWinFanfare, unlockAudio } from '../HighNoon/sounds'
+import { playTap } from '../HighNoon/sounds'
 
-type Phase = 'COUNTDOWN' | 'MASHING' | 'ENDED'
+const GAME_DURATION = 5000
 
+interface ButtonMashState {
+    tapCounts: Map<string, number>
+}
 
+const ButtonMash = () => {
+    const engine = useMinigameEngine<ButtonMashState>({
+        config: { countdownDuration: 3 },
+        initialGameState: {
+            tapCounts: new Map()
+        },
+        gameDuration: GAME_DURATION
+    })
 
-const GAME_DURATION = 5000 // 5 seconds of mashing
+    const {
+        phase,
+        countdown,
+        timeRemaining,
+        gameState,
+        winnerId,
+        isPlaying,
+        currentPlayerId,
+        players,
+        endGame,
+        updateGameState
+    } = engine
 
-const ButtonMash: React.FC<MinigameProps> = ({ players, onGameEnd }) => {
-    const { currentPlayer, broadcastAndApply, lastBroadcast } = useGame()
-
-    const [phase, setPhase] = useState<Phase>('COUNTDOWN')
-    const [countdown, setCountdown] = useState(3)
-    const [timeLeft, setTimeLeft] = useState(GAME_DURATION)
-    const [tapCounts, setTapCounts] = useState<Map<string, number>>(
-        new Map(players.map(p => [p.id, 0]))
-    )
-    const [winner, setWinner] = useState<string | null>(null)
-    const [screenShake, setScreenShake] = useState(false)
-
-    const startTimeRef = useRef<number>(0)
+    const screenShakeRef = useRef(false)
     const myTapsRef = useRef(0)
     const gameEndedRef = useRef(false)
-    const lastBroadcastCountRef = useRef(0)
-    const isHost = players.find(p => p.id === currentPlayer?.id)?.is_host ?? false
 
-    // Reset refs on mount (critical for game replay)
+    // Initialize tap counts when players are available
     useEffect(() => {
-        startTimeRef.current = 0
-        myTapsRef.current = 0
-        gameEndedRef.current = false
-        lastBroadcastCountRef.current = 0
-    }, [])
-
-    // Unlock audio
-    useEffect(() => {
-        const handleInteraction = () => {
-            unlockAudio()
-            window.removeEventListener('pointerdown', handleInteraction)
+        if (players.length > 0 && gameState.tapCounts.size === 0) {
+            updateGameState(() => ({
+                tapCounts: new Map(players.map(p => [p.id, 0]))
+            }))
         }
-        window.addEventListener('pointerdown', handleInteraction)
-        return () => window.removeEventListener('pointerdown', handleInteraction)
-    }, [])
+    }, [players, gameState.tapCounts.size, updateGameState])
 
-    // Countdown phase
+    // Check if game should end
     useEffect(() => {
-        if (phase !== 'COUNTDOWN') return
+        if (isPlaying && timeRemaining !== null && timeRemaining <= 0 && !gameEndedRef.current) {
+            gameEndedRef.current = true
 
-        const interval = setInterval(() => {
-            setCountdown(prev => {
-                if (prev <= 1) {
-                    clearInterval(interval)
-                    return 0
-                }
-                playCountdownBeep(false)
-                return prev - 1
-            })
-        }, 1000)
+            const sortedCounts = Array.from(gameState.tapCounts.entries())
+                .sort(([, a], [, b]) => b - a)
 
-        return () => clearInterval(interval)
-    }, [phase])
-
-    // Start mashing when countdown ends
-    useEffect(() => {
-        if (countdown === 0 && phase === 'COUNTDOWN') {
-            playCountdownBeep(true)
-            setPhase('MASHING')
-            startTimeRef.current = Date.now()
-
-            if (isHost) {
-                broadcastAndApply({
-                    type: 'MASH_START',
-                    startTime: Date.now()
-                })
+            const topPlayer = sortedCounts[0]
+            if (topPlayer) {
+                endGame(topPlayer[0], sortedCounts.map(([playerId, score], idx) => ({
+                    playerId,
+                    score,
+                    rank: idx + 1
+                })))
             }
         }
-    }, [countdown, phase, isHost, broadcastAndApply])
+    }, [isPlaying, timeRemaining, gameState.tapCounts, endGame])
 
-    // Timer during mashing
-    useEffect(() => {
-        if (phase !== 'MASHING') return
-
-        const interval = setInterval(() => {
-            const elapsed = Date.now() - startTimeRef.current
-            const remaining = Math.max(0, GAME_DURATION - elapsed)
-            setTimeLeft(remaining)
-
-            if (remaining === 0 && !gameEndedRef.current) {
-                gameEndedRef.current = true
-                clearInterval(interval)
-
-                // Broadcast final count
-                if (currentPlayer) {
-                    broadcastAndApply({
-                        type: 'MASH_FINAL',
-                        playerId: currentPlayer.id,
-                        count: myTapsRef.current
-                    })
-                }
-            }
-        }, 50)
-
-        return () => clearInterval(interval)
-    }, [phase, currentPlayer, broadcastAndApply])
-
-    // Listen for broadcasts
-    useEffect(() => {
-        if (!lastBroadcast) return
-
-        if (lastBroadcast.type === 'MASH_START') {
-            startTimeRef.current = lastBroadcast.startTime
-        }
-
-        if (lastBroadcast.type === 'MASH_TAP') {
-            setTapCounts(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.count)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'MASH_FINAL') {
-            setTapCounts(prev => {
-                const next = new Map(prev)
-                next.set(lastBroadcast.playerId, lastBroadcast.count)
-                return next
-            })
-        }
-
-        if (lastBroadcast.type === 'MASH_RESULT') {
-            setWinner(lastBroadcast.winnerId)
-            setPhase('ENDED')
-
-            if (lastBroadcast.winnerId === currentPlayer?.id) {
-                playWinFanfare()
-            }
-
-            if (isHost) {
-                setTimeout(() => {
-                    onGameEnd({ winnerId: lastBroadcast.winnerId })
-                }, 3000)
-            }
-        }
-    }, [lastBroadcast, currentPlayer?.id, isHost, onGameEnd])
-
-    // Host determines winner after game ends
-    useEffect(() => {
-        if (!isHost || phase !== 'MASHING' || timeLeft > 0) return
-
-        // Wait a bit for final counts to arrive
-        const timeout = setTimeout(() => {
-            const sortedCounts = [...tapCounts.entries()].sort((a, b) => b[1] - a[1])
-            const winnerId = sortedCounts[0]?.[0]
-
-            if (winnerId) {
-                broadcastAndApply({
-                    type: 'MASH_RESULT',
-                    winnerId,
-                    finalCounts: Object.fromEntries(tapCounts)
-                })
-            }
-        }, 500)
-
-        return () => clearTimeout(timeout)
-    }, [isHost, phase, timeLeft, tapCounts, broadcastAndApply])
-
-    // Handle tap
     const handleTap = useCallback(() => {
-        if (phase !== 'MASHING' || !currentPlayer || gameEndedRef.current) return
+        if (!isPlaying || !currentPlayerId || winnerId) return
 
         myTapsRef.current++
         playTap()
-        setScreenShake(true)
-        setTimeout(() => setScreenShake(false), 50)
 
-        // Update local immediately
-        setTapCounts(prev => {
-            const next = new Map(prev)
-            next.set(currentPlayer.id, myTapsRef.current)
-            return next
-        })
+        updateGameState(state => ({
+            ...state,
+            tapCounts: new Map([
+                ...state.tapCounts,
+                [currentPlayerId, myTapsRef.current]
+            ])
+        }))
 
-        // Broadcast every 5 taps to reduce network load
-        if (myTapsRef.current - lastBroadcastCountRef.current >= 5) {
-            lastBroadcastCountRef.current = myTapsRef.current
-            broadcastAndApply({
-                type: 'MASH_TAP',
-                playerId: currentPlayer.id,
-                count: myTapsRef.current
-            })
-        }
-    }, [phase, currentPlayer, broadcastAndApply])
+        screenShakeRef.current = true
+        setTimeout(() => { screenShakeRef.current = false }, 50)
+    }, [isPlaying, currentPlayerId, winnerId, updateGameState])
 
-    // Sort players by tap count
     const sortedPlayers = [...players].sort((a, b) =>
-        (tapCounts.get(b.id) || 0) - (tapCounts.get(a.id) || 0)
+        (gameState.tapCounts.get(b.id) || 0) - (gameState.tapCounts.get(a.id) || 0)
     )
 
-    const maxTaps = Math.max(...[...tapCounts.values()], 1)
+    const maxTaps = Math.max(...Array.from(gameState.tapCounts.values()), 1)
 
     return (
-        <motion.div
-            animate={screenShake ? { x: [0, -5, 5, -5, 5, 0] } : {}}
-            transition={{ duration: 0.1 }}
-            className="flex flex-col items-center justify-between w-full h-full bg-gradient-to-b from-purple-900 to-black select-none cursor-pointer p-4"
-            onPointerDown={handleTap}
+        <MinigameWrapper
+            phase={phase}
+            countdown={countdown}
+            winnerId={winnerId}
+            backgroundColor="bg-gradient-to-b from-purple-900 to-black"
         >
-            {/* Header */}
-            <div className="text-center pt-4">
-                <h1 className="text-3xl md:text-5xl font-pixel text-white mb-2"
-                    style={{ textShadow: '0 0 20px #FF00FF' }}>
-                    BUTTON MASH!
-                </h1>
-
-                {phase === 'COUNTDOWN' && (
-                    <motion.div
-                        key={countdown}
-                        initial={{ scale: 2, opacity: 0 }}
-                        animate={{ scale: 1, opacity: 1 }}
-                        className="text-8xl md:text-9xl font-pixel text-atari-yellow"
-                        style={{ textShadow: '0 0 30px #FFD700' }}
+            <motion.div
+                animate={screenShakeRef.current ? { x: [0, -5, 5, -5, 5, 0] } : {}}
+                transition={{ duration: 0.1 }}
+                className="flex flex-col items-center justify-between w-full h-full p-4 cursor-pointer"
+                onPointerDown={handleTap}
+            >
+                <div className="text-center pt-4">
+                    <h1
+                        className="text-3xl md:text-5xl font-pixel text-white mb-2"
+                        style={{ textShadow: '0 0 20px #FF00FF' }}
                     >
-                        {countdown}
-                    </motion.div>
-                )}
+                        BUTTON MASH!
+                    </h1>
 
-                {phase === 'MASHING' && (
-                    <div className="text-4xl md:text-6xl font-pixel text-red-400">
-                        {(timeLeft / 1000).toFixed(1)}s
-                    </div>
-                )}
+                    {isPlaying && timeRemaining !== null && (
+                        <div className="text-4xl md:text-6xl font-pixel text-red-400">
+                            {(timeRemaining / 1000).toFixed(1)}s
+                        </div>
+                    )}
+                </div>
 
-                {phase === 'ENDED' && winner && (
-                    <motion.div
-                        initial={{ scale: 0 }}
-                        animate={{ scale: 1 }}
-                        className="text-3xl font-pixel text-atari-green"
-                    >
-                        {players.find(p => p.id === winner)?.username} WINS!
-                    </motion.div>
-                )}
-            </div>
+                <div className="flex-1 w-full max-w-2xl flex flex-col justify-center gap-4 py-4">
+                    {sortedPlayers.map((player, idx) => {
+                        const count = gameState.tapCounts.get(player.id) || 0
+                        const isMe = player.id === currentPlayerId
 
-            {/* Player progress bars */}
-            <div className="flex-1 w-full max-w-2xl flex flex-col justify-center gap-4 py-4">
-                {sortedPlayers.map((player, idx) => {
-                    const count = tapCounts.get(player.id) || 0
-                    const percentage = (count / maxTaps) * 100
-                    const isMe = player.id === currentPlayer?.id
-
-                    return (
-                        <motion.div
-                            key={player.id}
-                            initial={{ x: -50, opacity: 0 }}
-                            animate={{ x: 0, opacity: 1 }}
-                            transition={{ delay: idx * 0.1 }}
-                            className="w-full"
-                        >
-                            <div className="flex items-center justify-between mb-1">
-                                <span className={clsx(
-                                    "font-pixel text-sm",
-                                    isMe ? "text-atari-green" : "text-white"
-                                )}>
-                                    {player.username}
-                                </span>
-                                <span className="font-mono text-xl text-atari-cyan">
-                                    {count}
-                                </span>
-                            </div>
-                            <div className="h-8 bg-gray-800 rounded-full overflow-hidden border-2 border-gray-600">
-                                <motion.div
-                                    className={clsx(
-                                        "h-full rounded-full",
-                                        isMe ? "bg-atari-green" : "bg-atari-pink"
-                                    )}
-                                    initial={{ width: 0 }}
-                                    animate={{ width: `${percentage}%` }}
-                                    transition={{ type: 'spring', damping: 20 }}
-                                    style={{ boxShadow: `0 0 10px ${isMe ? '#39ff14' : '#ff00ff'}` }}
+                        return (
+                            <motion.div
+                                key={player.id}
+                                initial={{ x: -50, opacity: 0 }}
+                                animate={{ x: 0, opacity: 1 }}
+                                transition={{ delay: idx * 0.1 }}
+                            >
+                                <PlayerScoreBar
+                                    username={player.username}
+                                    value={count}
+                                    maxValue={maxTaps}
+                                    isCurrentPlayer={isMe}
+                                    color={isMe ? 'bg-atari-green' : 'bg-atari-pink'}
                                 />
-                            </div>
+                            </motion.div>
+                        )
+                    })}
+                </div>
+
+                <div className="pb-8 text-center">
+                    {isPlaying && (
+                        <motion.div
+                            animate={{ scale: [1, 1.1, 1] }}
+                            transition={{ repeat: Infinity, duration: 0.2 }}
+                            className="text-2xl font-pixel text-white/70"
+                        >
+                            TAP ANYWHERE!
                         </motion.div>
-                    )
-                })}
-            </div>
+                    )}
 
-            {/* Tap zone indicator */}
-            <div className="pb-8 text-center">
-                {phase === 'MASHING' && (
-                    <motion.div
-                        animate={{ scale: [1, 1.1, 1] }}
-                        transition={{ repeat: Infinity, duration: 0.2 }}
-                        className="text-2xl font-pixel text-white/70"
-                    >
-                        TAP ANYWHERE!
-                    </motion.div>
-                )}
-
-                {phase === 'COUNTDOWN' && (
-                    <div className="text-xl text-white/50">
-                        GET READY...
-                    </div>
-                )}
-            </div>
-        </motion.div>
+                    {phase === 'COUNTDOWN' && (
+                        <div className="text-xl text-white/50">GET READY...</div>
+                    )}
+                </div>
+            </motion.div>
+        </MinigameWrapper>
     )
 }
 
