@@ -32,6 +32,21 @@ function App() {
       message: results.winnerId ? `${winner?.username || 'Unknown'} WINS!` : 'DRAW!'
     })
 
+    // Award points to winner (only host does this to prevent duplicates)
+    if (currentPlayer?.is_host && results.winnerId) {
+      // The winner gets 1 point per win
+      // We need to update the winner's score, not current player
+      const winnerPlayer = players.find(p => p.id === results.winnerId)
+      if (winnerPlayer) {
+        // Use supabase directly since submitScore only works for current player
+        const { supabase } = await import('./lib/supabaseClient')
+        await supabase.from('players').update({
+          score: winnerPlayer.score + 1
+        }).eq('id', winnerPlayer.id)
+        console.log('[SCORE] Awarded 1 point to:', winnerPlayer.username)
+      }
+    }
+
     // Move to RESULTS state
     if (currentPlayer?.is_host) {
       setRoomStatus('SCOREBOARD')
