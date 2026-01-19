@@ -194,7 +194,6 @@ const MeteorRain = () => {
 
     }, [isPlaying, currentPlayerId, gameState.alive, updateGameState])
 
-    const PLAYER_COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3']
     const currentTime = GAME_DURATION - (timeRemaining || GAME_DURATION)
 
     return (
@@ -243,7 +242,7 @@ const MeteorRain = () => {
                     <div className="absolute bottom-0 left-0 right-0 h-16 bg-gradient-to-t from-green-900 to-green-800" />
 
                     {/* Players */}
-                    {players.map((p, idx) => {
+                    {players.map((p) => {
                         const isMe = p.id === currentPlayerId
                         // Use local X for me to be instant, global for others
                         const x = isMe ? localPlayerX : (gameState.playerPositions.get(p.id) || 50)

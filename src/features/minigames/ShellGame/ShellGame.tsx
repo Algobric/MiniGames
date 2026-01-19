@@ -3,11 +3,11 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
+import { playTap } from '../HighNoon/sounds'
 
 const TOTAL_ROUNDS = 5
 
@@ -242,16 +242,7 @@ const ShellGame = () => {
     const CUP_COLORS = ['#8B4513', '#A0522D', '#D2691E']
 
     // Determine correctness for UI feedback
-    const getWinnerSlot = () => {
-        const slots = [0, 1, 2]
-        gameState.swaps.forEach(([a, b]) => {
-            const temp = slots[a]
-            slots[a] = slots[b]
-            slots[b] = temp
-        })
-        return slots.indexOf(gameState.ballPosition)
-    }
-    const winningSlot = getWinnerSlot()
+
 
     return (
         <MinigameWrapper
@@ -270,34 +261,6 @@ const ShellGame = () => {
 
                 {isPlaying && (
                     <div className="flex-1 flex items-center justify-center gap-4">
-                        {[0, 1, 2].map(slotIndex => {
-                            const cupId = cupPositions[slotIndex] // Which Cup is here?
-                            const hasBall = cupId === gameState.ballPosition
-                            const myPick = gameState.picks.get(currentPlayerId || '')
-                            const isPicked = myPick === slotIndex
-
-                            // Reveal feedback
-                            const isCorrect = slotIndex === winningSlot
-                            const showResult = gameState.revealing
-
-                            return (
-                                <motion.button
-                                    key={slotIndex} // Key by slot index so they don't re-mount, just animate? 
-                                // Actually, if we use `layout`, Framer Motion animates position changes if we re-order DOM.
-                                // But here we are just changing props of fixed slots?
-                                // No, the shuffle animation swaps the contents visually.
-                                // If we want smooth swap animation, we should render CUPS and position them absolutely based on slot.
-                                // But current implementation updates `cupPositions` state and relies on react re-render?
-                                // The previous impl used `cupPositions` and just swapped data.
-                                // Line 188: `rotateY` animation.
-                                // Let's stick to the Slot-based render, but animate the Swap?
-                                // Without complex layout animations, the cups will just "jump" or we rely on `layout` prop?
-                                // Let's try to map Cups to Slots for rendering.
-                                // Actually, rendering Cups by ID and positioning them is better for animation.
-                                />
-                            )
-                        })}
-
                         {/* Better Render Strategy: Render Cups 0,1,2 and position them based on current Slot */}
                         <div className="relative w-80 h-32">
                             {[0, 1, 2].map(cupId => {

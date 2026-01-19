@@ -5,9 +5,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
-import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
+import { playTap, playWinFanfare } from '../HighNoon/sounds'
 
 const DRAW_TIME = 10 // 10 seconds
 

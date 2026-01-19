@@ -3,11 +3,10 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
-import clsx from 'clsx'
-import { playTap, playWinFanfare, unlockAudio } from '../HighNoon/sounds'
+import { playTap, playWinFanfare } from '../HighNoon/sounds'
 
 const HOLE_X = 280
 const HOLE_Y = 150

@@ -5,7 +5,7 @@
 
 import { useEffect, useCallback, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import clsx from 'clsx'
 import { playTap, playFail, playWinFanfare } from '../HighNoon/sounds'
 

@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
+import { playTap, playFail } from '../HighNoon/sounds'
 
 type Direction = 'UP' | 'DOWN' | 'LEFT' | 'RIGHT'
 const TOTAL_ROUNDS = 10

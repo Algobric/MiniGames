@@ -3,9 +3,8 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
-import clsx from 'clsx'
 import { playWinFanfare } from '../HighNoon/sounds'
 
 const GRID_SIZE = 10
