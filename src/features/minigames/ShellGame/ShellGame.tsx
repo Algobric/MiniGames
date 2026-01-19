@@ -3,7 +3,7 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
@@ -192,7 +192,7 @@ const ShellGame = () => {
                 dispatchGameEvent('REVEAL_ROUND', { scores: Array.from(newScores.entries()) })
             }
         }
-    }, [gameState.round, gameState.revealing, gameState.shuffling, gameState.picks, gameState.scores.size, gameState.swaps, gameState.ballPosition, gameState.scores, players, isLeader, isPlaying, winnerId, dispatchGameEvent, endGame, generateShuffles])
+    }, [gameState.round, gameState.revealing, gameState.shuffling, gameState.picks, gameState.scores.size, gameState.swaps, gameState.ballPosition, gameState.scores, players, isPlaying, winnerId, dispatchGameEvent, endGame, generateShuffles])
 
     // Client Side Animation Handling
     useEffect(() => {

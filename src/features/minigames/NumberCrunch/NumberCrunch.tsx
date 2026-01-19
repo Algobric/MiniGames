@@ -80,7 +80,6 @@ const NumberCrunch = () => {
                 }
             }
             if (event.type === 'SOLVE_PROBLEM') {
-                const { score } = event as any
                 // Wait, score is derived. 1 point per solve?
                 // Or senderId gets +1?
                 // "SOLVE_PROBLEM" implies sender solved it.
@@ -116,13 +115,12 @@ const NumberCrunch = () => {
         players,
         endGame,
         dispatchGameEvent,
-        updateGameState
     } = engine
 
     const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null)
     const [answered, setAnswered] = useState(false)
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
-    const problemRef = useRef<number>(0) // To dedupe sends?
+
 
     // Game Over on Timeout (Host)
     useEffect(() => {

@@ -45,8 +45,8 @@ const ReactionRace = () => {
             if (event.type === 'TAP_TARGET') {
                 if (state.roundWinner) return state // Already won
 
-                const { timestamp } = event as any
-                const reaction = timestamp - state.targetAppearTime
+
+
 
                 const newScores = new Map(state.scores)
                 newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + 1)

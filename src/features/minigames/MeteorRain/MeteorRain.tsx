@@ -81,7 +81,7 @@ const MeteorRain = () => {
         dispatchGameEvent
     } = engine
 
-    const isLeader = players.length > 0 && players[0].id === currentPlayerId
+
     const [localPlayerX, setLocalPlayerX] = useState(50)
     const gameEndedRef = useRef(false)
     const meteorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
