@@ -34,10 +34,15 @@ interface Bullet {
 }
 
 interface TankBattleState {
-    tanks: Map<string, Tank>
+    tanks: Tank[]  // Changed from Map to array
     bullets: Bullet[]
-    scores: Map<string, number>
+    scores: { playerId: string; score: number }[]  // Changed from Map to array
 }
+
+// Helper functions for safe access
+const getTank = (tanks: Tank[], id: string) => tanks.find(t => t.id === id)
+const getScore = (scores: { playerId: string; score: number }[], id: string) =>
+    scores.find(s => s.playerId === id)?.score || 0
 
 const TankBattle = () => {
     const engine = useMinigameEngine<TankBattleState>({
@@ -46,34 +51,38 @@ const TankBattle = () => {
             gameDuration: 60
         },
         initialGameState: {
-            tanks: new Map(),
+            tanks: [],
             bullets: [],
-            scores: new Map()
+            scores: []
         },
         gameReducer: (state, event) => {
+            // Ensure arrays exist (in case of sync issues)
+            const tanks = Array.isArray(state.tanks) ? state.tanks : []
+            const bullets = Array.isArray(state.bullets) ? state.bullets : []
+
             if (event.type === 'TANK_UPDATE') {
                 const { x, y, angle } = event as any
-                const p = state.tanks.get(event.senderId)
-                if (!p) return state
-                const nextTanks = new Map(state.tanks)
-                nextTanks.set(event.senderId, { ...p, x, y, angle })
-                return { ...state, tanks: nextTanks }
+                const tankIdx = tanks.findIndex(t => t.id === event.senderId)
+                if (tankIdx === -1) return state
+                const updatedTanks = [...tanks]
+                updatedTanks[tankIdx] = { ...tanks[tankIdx], x, y, angle }
+                return { ...state, tanks: updatedTanks }
             }
             if (event.type === 'TANK_SHOOT') {
                 const { id, x, y, angle, spawnTime } = event as any
-                const p = state.tanks.get(event.senderId)
-                if (!p) return state
+                const tankIdx = tanks.findIndex(t => t.id === event.senderId)
+                if (tankIdx === -1) return state
 
-                const nextTanks = new Map(state.tanks)
-                nextTanks.set(event.senderId, { ...p, lastShot: spawnTime })
+                const updatedTanks = [...tanks]
+                updatedTanks[tankIdx] = { ...tanks[tankIdx], lastShot: spawnTime }
 
-                const nextBullets = [...state.bullets, {
+                const nextBullets = [...bullets, {
                     id,
                     ownerId: event.senderId,
                     x, y, angle, spawnTime
                 }]
 
-                return { ...state, tanks: nextTanks, bullets: nextBullets }
+                return { ...state, tanks: updatedTanks, bullets: nextBullets }
             }
             return state
         }
@@ -93,6 +102,11 @@ const TankBattle = () => {
         dispatchGameEvent
     } = engine
 
+    // Safely access state arrays
+    const tanks = Array.isArray(gameState.tanks) ? gameState.tanks : []
+    const bullets = Array.isArray(gameState.bullets) ? gameState.bullets : []
+    const scores = Array.isArray(gameState.scores) ? gameState.scores : []
+
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const [localTank, setLocalTank] = useState<Tank | null>(null)
     const bulletIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -100,40 +114,29 @@ const TankBattle = () => {
 
     // Init Tanks
     useEffect(() => {
-        if (players.length > 0 && gameState.tanks.size === 0 && isPlaying) {
-            const newTanks = new Map<string, Tank>()
-            players.forEach((p, i) => {
-                newTanks.set(p.id, {
-                    id: p.id,
-                    x: (i % 2 === 0) ? 30 : ARENA_WIDTH - 30, // Basic spawn points
-                    y: ARENA_HEIGHT / 2 + (i * 20),
-                    angle: (i % 2 === 0) ? 0 : 180,
-                    health: 3,
-                    lastShot: 0
-                })
-            })
+        if (players.length > 0 && tanks.length === 0 && isPlaying) {
+            const newTanks: Tank[] = players.map((p, i) => ({
+                id: p.id,
+                x: (i % 2 === 0) ? 30 : ARENA_WIDTH - 30,
+                y: ARENA_HEIGHT / 2 + (i * 20),
+                angle: (i % 2 === 0) ? 0 : 180,
+                health: 3,
+                lastShot: 0
+            }))
 
             updateGameState(state => ({ ...state, tanks: newTanks }))
         }
-    }, [players, isPlaying, gameState.tanks.size, updateGameState])
+    }, [players, isPlaying, tanks.length, updateGameState])
 
-    // Sync Local Tank from GameState initially and when needed (if drift is large or init)
+    // Sync Local Tank from GameState initially and when needed
     useEffect(() => {
-        if (currentPlayerId && gameState.tanks.has(currentPlayerId)) {
-            const serverTank = gameState.tanks.get(currentPlayerId)!
-            if (!localTank) {
+        if (currentPlayerId) {
+            const serverTank = getTank(tanks, currentPlayerId)
+            if (serverTank && !localTank) {
                 setLocalTank(serverTank)
-            } else {
-                // Optional: Reconcile drift if too large?
-                // For now, let local input drive local state, and sync updates state.
-                // If we get hit/reset, state update handles it?
-                // gameState updates come from Reducer (our events) OR Host Sync.
-                // Host Sync might correct position.
-                // If Host Syncs, we should snap to it?
-                // This is complex. For now, rely on local inputs + frequent updates.
             }
         }
-    }, [currentPlayerId, gameState.tanks, localTank])
+    }, [currentPlayerId, tanks, localTank])
 
     // Bullet Physics (Leader)
     useEffect(() => {
@@ -141,36 +144,44 @@ const TankBattle = () => {
 
         bulletIntervalRef.current = setInterval(() => {
             updateGameState(state => {
+                const stateTanks = Array.isArray(state.tanks) ? state.tanks : []
+                const stateBullets = Array.isArray(state.bullets) ? state.bullets : []
+                const stateScores = Array.isArray(state.scores) ? state.scores : []
+
                 const now = Date.now()
-                const nextBullets = []
-                const nextTanks = new Map(state.tanks)
-                const nextScores = new Map(state.scores)
+                const nextBullets: Bullet[] = []
+                let nextTanks = [...stateTanks]
+                let nextScores = [...stateScores]
                 let hitEvents = false
 
-                for (const b of state.bullets) {
-                    // Check if old
+                for (const b of stateBullets) {
                     if (now - b.spawnTime > 3000) continue
 
-                    // Calc current pos
                     const elapsed = (now - b.spawnTime) / 1000
                     const bx = b.x + Math.cos(b.angle * Math.PI / 180) * BULLET_SPEED * elapsed
                     const by = b.y + Math.sin(b.angle * Math.PI / 180) * BULLET_SPEED * elapsed
 
-                    // Bounds
                     if (bx < 0 || bx > ARENA_WIDTH || by < 0 || by > ARENA_HEIGHT) continue
 
-                    // Collision
                     let hit = false
-                    for (const [tid, tank] of nextTanks) {
-                        if (tank.health <= 0 || tid === b.ownerId) continue
+                    for (let i = 0; i < nextTanks.length; i++) {
+                        const tank = nextTanks[i]
+                        if (tank.health <= 0 || tank.id === b.ownerId) continue
 
                         const dist = Math.sqrt((bx - tank.x) ** 2 + (by - tank.y) ** 2)
                         if (dist < TANK_SIZE) {
-                            // Hit!
                             hit = true
                             const newHealth = tank.health - 1
-                            nextTanks.set(tid, { ...tank, health: newHealth })
-                            nextScores.set(b.ownerId, (nextScores.get(b.ownerId) || 0) + 1)
+                            nextTanks = [...nextTanks]
+                            nextTanks[i] = { ...tank, health: newHealth }
+
+                            const scoreIdx = nextScores.findIndex(s => s.playerId === b.ownerId)
+                            if (scoreIdx >= 0) {
+                                nextScores = [...nextScores]
+                                nextScores[scoreIdx] = { ...nextScores[scoreIdx], score: nextScores[scoreIdx].score + 1 }
+                            } else {
+                                nextScores = [...nextScores, { playerId: b.ownerId, score: 1 }]
+                            }
                             hitEvents = true
                             break
                         }
@@ -179,7 +190,7 @@ const TankBattle = () => {
                     if (!hit) nextBullets.push(b)
                 }
 
-                return hitEvents || nextBullets.length !== state.bullets.length
+                return hitEvents || nextBullets.length !== stateBullets.length
                     ? { ...state, bullets: nextBullets, tanks: nextTanks, scores: nextScores }
                     : state
             })
@@ -192,20 +203,20 @@ const TankBattle = () => {
     useEffect(() => {
         if (!isPlaying || !isLeader || winnerId) return
 
-        const alive = Array.from(gameState.tanks.values()).filter(t => t.health > 0)
+        const alive = tanks.filter(t => t.health > 0)
 
         if (players.length > 1 && alive.length <= 1) {
-            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
-            let winner = alive.length > 0 ? alive[0].id : sorted[0]?.[0]
+            const sorted = [...scores].sort((a, b) => b.score - a.score)
+            const winner = alive.length > 0 ? alive[0].id : sorted[0]?.playerId || null
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
         } else if (timeRemaining !== null && timeRemaining <= 0) {
-            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
-            const winner = sorted[0]?.[0]
+            const sorted = [...scores].sort((a, b) => b.score - a.score)
+            const winner = sorted[0]?.playerId || null
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
         }
-    }, [gameState.tanks, gameState.scores, timeRemaining, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+    }, [tanks, scores, timeRemaining, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
 
 
     // Input Handling
@@ -289,9 +300,8 @@ const TankBattle = () => {
                 {/* Arena */}
                 <div className="relative w-full max-w-lg aspect-video bg-stone-800 rounded-xl overflow-hidden border-4 border-stone-600 shadow-2xl">
                     {/* Tanks */}
-                    {Array.from(gameState.tanks.values()).map((tank, idx) => {
+                    {tanks.map((tank, idx) => {
                         const isMe = tank.id === currentPlayerId
-                        // Use local state for me if available for smoothness
                         const displayTank = (isMe && localTank) ? localTank : tank
                         if (displayTank.health <= 0) return null
 
@@ -311,18 +321,17 @@ const TankBattle = () => {
                                     className="w-full h-full rounded border-2 border-black/50"
                                     style={{ backgroundColor: PLAYER_COLORS[idx % PLAYER_COLORS.length] }}
                                 >
-                                    {/* Cannon */}
                                     <div className="absolute top-1/2 left-1/2 h-1.5 w-6 bg-black origin-left transform -translate-y-1/2" />
                                 </div>
                                 <div className="absolute -top-6 transform -rotate-0 text-xs text-white bg-black/50 px-1 rounded">
-                                    hit:{gameState.scores.get(tank.id) || 0}
+                                    hit:{getScore(scores, tank.id)}
                                 </div>
                             </motion.div>
                         )
                     })}
 
                     {/* Bullets */}
-                    {gameState.bullets.map(b => {
+                    {bullets.map(b => {
                         const elapsed = (Date.now() - b.spawnTime) / 1000
                         // Render logic: duplicate leader physics for smooth render
                         const dist = 150 * elapsed
