@@ -3,7 +3,7 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
@@ -24,7 +24,7 @@ const PHRASES = [
 
 interface TypeRaceState {
     targetPhrase: string
-    typedText: string
+    // typedText: string // Removed to prevent confusion, local only
     progress: Map<string, number>
     startTime: number
     finishTimes: Map<string, number>
@@ -35,10 +35,40 @@ const TypeRace = () => {
         config: { countdownDuration: 3 },
         initialGameState: {
             targetPhrase: '',
-            typedText: '',
             progress: new Map(),
             startTime: 0,
             finishTimes: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'START_RACE') {
+                const { phrase, startTime } = event as any
+                return {
+                    ...state,
+                    targetPhrase: phrase,
+                    startTime,
+                    progress: new Map(),
+                    finishTimes: new Map()
+                }
+            }
+            if (event.type === 'UPDATE_PROGRESS') {
+                const { progress } = event as any
+                const newProgress = new Map(state.progress)
+                newProgress.set(event.senderId, progress)
+
+                // Check finish
+                if (progress >= 100) {
+                    const time = Date.now() - state.startTime
+                    const newFinishTimes = new Map(state.finishTimes)
+                    // Keep first finish time if already set
+                    if (!newFinishTimes.has(event.senderId)) {
+                        newFinishTimes.set(event.senderId, time)
+                    }
+                    return { ...state, progress: newProgress, finishTimes: newFinishTimes }
+                }
+
+                return { ...state, progress: newProgress }
+            }
+            return state
         }
     })
 
@@ -51,31 +81,57 @@ const TypeRace = () => {
         currentPlayerId,
         players,
         endGame,
-        updateGameState
+        dispatchGameEvent
     } = engine
 
     const inputRef = useRef<HTMLInputElement>(null)
     const gameEndedRef = useRef(false)
+    const [localTypedText, setLocalTypedText] = useState('')
 
-    // Initialize progress and start game
+    // Initialize progress and start game (Host)
     useEffect(() => {
-        if (isPlaying && !gameState.targetPhrase) {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (isPlaying && isLeader && !gameState.targetPhrase) {
             const phrase = PHRASES[Math.floor(Math.random() * PHRASES.length)]
-            updateGameState(state => ({
-                ...state,
-                targetPhrase: phrase,
-                startTime: Date.now(),
-                progress: new Map(players.map(p => [p.id, 0]))
-            }))
-            setTimeout(() => inputRef.current?.focus(), 100)
+            dispatchGameEvent('START_RACE', { phrase, startTime: Date.now() })
         }
-    }, [isPlaying, gameState.targetPhrase, players, updateGameState])
+    }, [isPlaying, gameState.targetPhrase, players, currentPlayerId, dispatchGameEvent])
+
+    // Focus input on start
+    useEffect(() => {
+        if (isPlaying && gameState.targetPhrase) {
+            setTimeout(() => inputRef.current?.focus(), 100)
+            setLocalTypedText('')
+        }
+    }, [isPlaying, gameState.targetPhrase])
+
+    // Game End Checker (Host)
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (gameState.finishTimes.size > 0 && !gameEndedRef.current) {
+            const winner = Array.from(gameState.finishTimes.entries()).sort((a, b) => a[1] - b[1])[0]?.[0]
+            if (winner) {
+                gameEndedRef.current = true
+                playWinFanfare()
+                endGame(winner, [{
+                    playerId: winner,
+                    score: 100,
+                    rank: 1,
+                    metadata: { time: gameState.finishTimes.get(winner) }
+                }])
+            }
+        }
+    }, [gameState.finishTimes, endGame, players, currentPlayerId])
+
 
     const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         if (!isPlaying || !currentPlayerId || winnerId ||
             gameState.finishTimes.has(currentPlayerId)) return
 
         const newText = e.target.value
+        setLocalTypedText(newText)
 
         // Calculate progress
         let correct = 0
@@ -85,34 +141,14 @@ const TypeRace = () => {
         }
         const progressPct = Math.round((correct / gameState.targetPhrase.length) * 100)
 
-        updateGameState(state => ({
-            ...state,
-            typedText: newText,
-            progress: new Map([...state.progress, [currentPlayerId, progressPct]])
-        }))
+        // Dispatch Progress
+        dispatchGameEvent('UPDATE_PROGRESS', { progress: progressPct })
 
-        // Check completion
+        // Check completion local feedback
         if (newText === gameState.targetPhrase) {
-            if (gameEndedRef.current) return
-            gameEndedRef.current = true
-
-            const finishTime = Date.now() - gameState.startTime
             playTap()
-
-            updateGameState(state => ({
-                ...state,
-                finishTimes: new Map([...state.finishTimes, [currentPlayerId, finishTime]])
-            }))
-
-            playWinFanfare()
-            endGame(currentPlayerId, [{
-                playerId: currentPlayerId,
-                score: 100,
-                rank: 1,
-                metadata: { time: finishTime }
-            }])
         }
-    }, [isPlaying, currentPlayerId, winnerId, gameState, updateGameState, endGame])
+    }, [isPlaying, currentPlayerId, winnerId, gameState, dispatchGameEvent])
 
     return (
         <MinigameWrapper
@@ -134,9 +170,9 @@ const TypeRace = () => {
                             <div className="text-sm text-white/50 mb-2">Type this:</div>
                             <div className="text-2xl text-white font-mono">
                                 {gameState.targetPhrase.split('').map((char, i) => {
-                                    const typed = gameState.typedText[i]
+                                    const typed = localTypedText[i]
                                     const isCorrect = typed === char
-                                    const isTyped = i < gameState.typedText.length
+                                    const isTyped = i < localTypedText.length
 
                                     return (
                                         <span
@@ -157,7 +193,7 @@ const TypeRace = () => {
                         <input
                             ref={inputRef}
                             type="text"
-                            value={gameState.typedText}
+                            value={localTypedText}
                             onChange={handleInputChange}
                             disabled={!isPlaying || gameState.finishTimes.has(currentPlayerId || '')}
                             className="w-full px-4 py-3 text-xl font-mono bg-white/20 border-2 border-white/30 rounded-lg text-white focus:outline-none focus:border-cyan-400"

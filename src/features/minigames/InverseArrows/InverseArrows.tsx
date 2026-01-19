@@ -26,6 +26,26 @@ const InverseArrows = () => {
             round: 0,
             currentDirection: 'UP',
             scores: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'NEW_ROUND') {
+                const { round, direction } = event as any
+                return {
+                    ...state,
+                    round,
+                    currentDirection: direction
+                }
+            }
+            if (event.type === 'SUBMIT_ANSWER') {
+                const { isCorrect } = event as any
+                if (isCorrect) {
+                    const newScores = new Map(state.scores)
+                    newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + 1)
+                    return { ...state, scores: newScores }
+                }
+                return state
+            }
+            return state
         }
     })
 
@@ -37,43 +57,38 @@ const InverseArrows = () => {
         isPlaying,
         currentPlayerId,
         players,
-        updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent
     } = engine
 
     const [answered, setAnswered] = useState(false)
     const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null)
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const roundTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+    const OPPOSITE: Record<Direction, Direction> = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' }
+    const ARROWS: Record<Direction, string> = { UP: '⬆️', DOWN: '⬇️', LEFT: '⬅️', RIGHT: '➡️' }
 
-    // Helper to start next round
+    // Helper to start next round (Host Only)
     const nextRound = useCallback(() => {
-        if (!isLeader) return
-
         const nextR = gameState.round + 1
         if (nextR > TOTAL_ROUNDS) {
             // Game Over
-            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
-            const winner = sorted[0]?.[0] || null
-            endGame(winner)
+            dispatchGameEvent('SYSTEM_GAME_END_CHECK', {})
             return
         }
 
         const nextDir = DIRECTIONS[Math.floor(Math.random() * DIRECTIONS.length)]
-        updateGameState(state => ({
-            ...state,
-            round: nextR,
-            currentDirection: nextDir
-        }))
+        dispatchGameEvent('NEW_ROUND', { round: nextR, direction: nextDir })
 
-    }, [gameState.round, gameState.scores, isLeader, updateGameState, endGame])
+    }, [gameState.round, dispatchGameEvent])
 
-    // Initial Start
+    // Initial Start (Host)
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (isPlaying && isLeader && gameState.round === 0) {
             nextRound()
         }
-    }, [isPlaying, isLeader, gameState.round, nextRound])
+    }, [isPlaying, isLeader, gameState.round, nextRound, players, currentPlayerId])
 
     // Reset local state on round change
     useEffect(() => {
@@ -81,22 +96,36 @@ const InverseArrows = () => {
         setFeedback(null)
     }, [gameState.round])
 
-    // Auto-advance round logic (if everyone answered OR timeout)
+    // Auto-advance round logic (Host Timer)
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (!isPlaying || !isLeader || winnerId) return
 
         // We can use a simple timer for each round (e.g. 2 seconds)
         if (roundTimerRef.current) clearTimeout(roundTimerRef.current)
-        roundTimerRef.current = setTimeout(() => {
-            nextRound()
-        }, 2500) // 2.5 seconds per round
+
+        // Start timer only if round > 0 (game running)
+        if (gameState.round > 0) {
+            roundTimerRef.current = setTimeout(() => {
+                nextRound()
+            }, 2500) // 2.5 seconds per round
+        }
 
         return () => { if (roundTimerRef.current) clearTimeout(roundTimerRef.current) }
-    }, [gameState.round, isPlaying, isLeader, winnerId, nextRound])
+    }, [gameState.round, isPlaying, isLeader, winnerId, nextRound, players, currentPlayerId])
 
+    // Game End Check (Host)
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
 
-    const OPPOSITE: Record<Direction, Direction> = { UP: 'DOWN', DOWN: 'UP', LEFT: 'RIGHT', RIGHT: 'LEFT' }
-    const ARROWS: Record<Direction, string> = { UP: '⬆️', DOWN: '⬇️', LEFT: '⬅️', RIGHT: '➡️' }
+        if (gameState.round > TOTAL_ROUNDS) {
+            const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
+            const winner = sorted[0]?.[0] || null
+            endGame(winner)
+        }
+    }, [gameState.round, gameState.scores, endGame, players, currentPlayerId])
+
 
     const handleAnswer = useCallback((dir: Direction) => {
         if (!isPlaying || !currentPlayerId || answered) return
@@ -107,16 +136,15 @@ const InverseArrows = () => {
         setAnswered(true)
         setFeedback(isCorrect ? 'correct' : 'wrong')
 
+        if (isCorrect) playTap()
+        else playFail()
+
+        // Sync Score if correct
         if (isCorrect) {
-            playTap()
-            updateGameState(state => ({
-                ...state,
-                scores: new Map([...state.scores, [currentPlayerId, (state.scores.get(currentPlayerId) || 0) + 1]])
-            }))
-        } else {
-            playFail()
+            dispatchGameEvent('SUBMIT_ANSWER', { isCorrect: true })
         }
-    }, [isPlaying, currentPlayerId, answered, gameState.currentDirection, updateGameState])
+
+    }, [isPlaying, currentPlayerId, answered, gameState.currentDirection, dispatchGameEvent, OPPOSITE])
 
     return (
         <MinigameWrapper

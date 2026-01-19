@@ -35,6 +35,36 @@ const MeteorRain = () => {
             meteors: [],
             playerPositions: new Map(),
             alive: new Set()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'SPAWN_METEOR') {
+                const { meteor } = event as any
+                return {
+                    ...state,
+                    meteors: [...state.meteors, meteor]
+                }
+            }
+            if (event.type === 'MOVE_PLAYER') {
+                const { x } = event as any
+                const newPositions = new Map(state.playerPositions)
+                newPositions.set(event.senderId, x)
+                return { ...state, playerPositions: newPositions }
+            }
+            if (event.type === 'PLAYER_HIT') {
+                const newAlive = new Set(state.alive)
+                newAlive.delete(event.senderId)
+                return { ...state, alive: newAlive }
+            }
+            if (event.type === 'INIT_GAME') {
+                // Initialize players
+                const { playerIds } = event as any
+                return {
+                    ...state,
+                    alive: new Set(playerIds),
+                    playerPositions: new Map(playerIds.map((id: string) => [id, 50]))
+                }
+            }
+            return state
         }
     })
 
@@ -47,8 +77,8 @@ const MeteorRain = () => {
         isPlaying,
         currentPlayerId,
         players,
-        updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -56,19 +86,17 @@ const MeteorRain = () => {
     const gameEndedRef = useRef(false)
     const meteorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-    // Init Logic
+    // Init Logic (Host)
     useEffect(() => {
-        if (players.length > 0 && gameState.alive.size === 0 && isPlaying) {
-            updateGameState(state => ({
-                ...state,
-                alive: new Set(players.map(p => p.id)),
-                playerPositions: new Map(players.map(p => [p.id, 50]))
-            }))
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (players.length > 0 && gameState.alive.size === 0 && isPlaying && isLeader) {
+            dispatchGameEvent('INIT_GAME', { playerIds: players.map(p => p.id) })
         }
-    }, [players, isPlaying, gameState.alive.size, updateGameState])
+    }, [players, isPlaying, gameState.alive.size, dispatchGameEvent, currentPlayerId])
 
     // Leader Spawn Logic
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (!isPlaying || !isLeader || winnerId) {
             if (meteorIntervalRef.current) clearInterval(meteorIntervalRef.current)
             return
@@ -77,51 +105,41 @@ const MeteorRain = () => {
         meteorIntervalRef.current = setInterval(() => {
             const now = GAME_DURATION - (timeRemaining || GAME_DURATION)
 
-            // Clean up old meteors
-            // (Meteors taking > 5s to fall are gone)
+            // We can cleanup old meteors in UI or Reducer? 
+            // Better to cleanup in Reducer occasionally or just ignore them.
 
-            updateGameState(state => {
-                const activeMeteors = state.meteors.filter(m => (now - m.spawnTime) < 5)
+            const newMeteor: Meteor = {
+                id: `m_${Date.now()}_${Math.random()}`,
+                x: Math.random() * 90 + 5,
+                speed: 30 + Math.random() * 20,
+                spawnTime: now
+            }
 
-                const newMeteor: Meteor = {
-                    id: `m_${Date.now()}_${Math.random()}`,
-                    x: Math.random() * 90 + 5, // 5-95%
-                    speed: 30 + Math.random() * 20, // % per second
-                    spawnTime: now
-                }
+            dispatchGameEvent('SPAWN_METEOR', { meteor: newMeteor })
 
-                return {
-                    ...state,
-                    meteors: [...activeMeteors, newMeteor] // Limit max meteors?
-                }
-            })
         }, 400) // Spawn every 400ms
 
         return () => { if (meteorIntervalRef.current) clearInterval(meteorIntervalRef.current) }
-    }, [isPlaying, isLeader, winnerId, timeRemaining, updateGameState])
+    }, [isPlaying, winnerId, timeRemaining, dispatchGameEvent, players, currentPlayerId])
 
     // Client Collision & Movement Logic
     useEffect(() => {
         if (!isPlaying || !currentPlayerId || !gameState.alive.has(currentPlayerId) || winnerId) return
 
         const interval = setInterval(() => {
-            // Check collision locally
             const now = GAME_DURATION - (timeRemaining || GAME_DURATION)
             const myX = localPlayerX
-
-            // Player Y is roughly bottom 15% (ground is 16px high?)
-            // Let's say Player Hitbox Y is 85% to 95%
-
             let hit = false
+
             for (const m of gameState.meteors) {
                 const elapsed = now - m.spawnTime
-                const y = -10 + (m.speed * elapsed) // Starts at -10%
+                const y = -10 + (m.speed * elapsed)
 
                 // Hitbox Y intersection
                 if (y > 80 && y < 95) {
                     // Hitbox X
                     const dist = Math.abs(m.x - myX)
-                    if (dist < 5) { // 5% radius roughly
+                    if (dist < 5) {
                         hit = true
                         break
                     }
@@ -130,23 +148,17 @@ const MeteorRain = () => {
 
             if (hit) {
                 playFail()
-                updateGameState(state => {
-                    const newAlive = new Set(state.alive)
-                    newAlive.delete(currentPlayerId)
-                    return { ...state, alive: newAlive }
-                })
+                dispatchGameEvent('PLAYER_HIT', {})
             }
 
-        }, 50) // High frequency check
+        }, 50)
 
         return () => clearInterval(interval)
-    }, [isPlaying, currentPlayerId, gameState.meteors, gameState.alive, timeRemaining, localPlayerX, updateGameState, winnerId])
-
-    // Sync Local Position to Global every now and then? Or just on move?
-    // We update global state on move click
+    }, [isPlaying, currentPlayerId, gameState.meteors, gameState.alive, timeRemaining, localPlayerX, dispatchGameEvent, winnerId])
 
     // Game Over Logic
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
 
         const aliveCount = gameState.alive.size
@@ -161,9 +173,6 @@ const MeteorRain = () => {
             gameEndedRef.current = true
             endGame(null)
         } else if (timeOut) {
-            // Time up - Survivors win? Or Random?
-            // Usually survival games end with survivors winning.
-            // If multiple survivors, Draw?
             gameEndedRef.current = true
             const survivors = [...gameState.alive]
             const winner = survivors.length > 0 ? survivors[0] : null
@@ -171,7 +180,7 @@ const MeteorRain = () => {
             endGame(winner)
         }
 
-    }, [gameState.alive, players.length, timeRemaining, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+    }, [gameState.alive, players.length, timeRemaining, isPlaying, winnerId, currentPlayerId, endGame])
 
 
     const handleMove = useCallback((direction: 'left' | 'right') => {
@@ -183,16 +192,12 @@ const MeteorRain = () => {
                 ? Math.max(5, prev - PLAYER_SPEED)
                 : Math.min(95, prev + PLAYER_SPEED)
 
-            // Sync to global state for others to see
-            updateGameState(state => ({
-                ...state,
-                playerPositions: new Map([...state.playerPositions, [currentPlayerId, next]])
-            }))
+            dispatchGameEvent('MOVE_PLAYER', { x: next })
 
             return next
         })
 
-    }, [isPlaying, currentPlayerId, gameState.alive, updateGameState])
+    }, [isPlaying, currentPlayerId, gameState.alive, dispatchGameEvent])
 
     const currentTime = GAME_DURATION - (timeRemaining || GAME_DURATION)
 

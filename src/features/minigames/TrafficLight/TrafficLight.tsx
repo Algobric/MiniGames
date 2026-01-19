@@ -23,6 +23,26 @@ const TrafficLight = () => {
         initialGameState: {
             light: 'RED',
             positions: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'CHANGE_LIGHT') {
+                const { light } = event as any
+                return { ...state, light }
+            }
+            if (event.type === 'MOVE_PLAYER') {
+                const { pos } = event as any
+                const newPositions = new Map(state.positions)
+                newPositions.set(event.senderId, pos)
+                return { ...state, positions: newPositions }
+            }
+            if (event.type === 'INIT_POSITIONS') {
+                const { playerIds } = event as any
+                return {
+                    ...state,
+                    positions: new Map(playerIds.map((id: string) => [id, 0]))
+                }
+            }
+            return state
         }
     })
 
@@ -35,39 +55,33 @@ const TrafficLight = () => {
         currentPlayerId,
         players,
         endGame,
-        updateGameState
+        dispatchGameEvent
     } = engine
 
     const [isHolding, setIsHolding] = useState(false)
-
-    const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const gameEndedRef = useRef(false)
 
-    // Player position initialization
+    // Init Positions (Host)
     useEffect(() => {
-        if (players.length > 0 && gameState.positions.size === 0) {
-            updateGameState(state => ({
-                ...state,
-                positions: new Map(players.map(p => [p.id, 0]))
-            }))
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (isPlaying && isLeader && gameState.positions.size === 0) {
+            dispatchGameEvent('INIT_POSITIONS', { playerIds: players.map(p => p.id) })
         }
-    }, [players, gameState.positions.size, updateGameState])
+    }, [players, isPlaying, gameState.positions.size, dispatchGameEvent, currentPlayerId])
 
-    // Actually, triggered cycle:
+    // Traffic Light Cycle (Host)
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (!isPlaying || !isLeader || winnerId) return
 
         const duration = Math.random() * 2000 + 1500
         const timeout = setTimeout(() => {
-            updateGameState(state => ({
-                ...state,
-                light: state.light === 'GREEN' ? 'RED' : 'GREEN'
-            }))
+            const nextLight = gameState.light === 'GREEN' ? 'RED' : 'GREEN'
+            dispatchGameEvent('CHANGE_LIGHT', { light: nextLight })
         }, duration)
 
         return () => clearTimeout(timeout)
-    }, [gameState.light, isPlaying, isLeader, winnerId, updateGameState])
-
+    }, [gameState.light, isPlaying, winnerId, dispatchGameEvent, players, currentPlayerId])
 
     // Movement Logic (Local + Sync)
     useEffect(() => {
@@ -76,38 +90,37 @@ const TrafficLight = () => {
         const interval = setInterval(() => {
             if (gameState.light === 'GREEN') {
                 playTap()
-                updateGameState(state => {
-                    const currentPos = state.positions.get(currentPlayerId) || 0
-                    const newPos = Math.min(FINISH_LINE, currentPos + 2)
 
-                    if (newPos >= FINISH_LINE && !gameEndedRef.current) {
-                        gameEndedRef.current = true
+                const currentPos = gameState.positions.get(currentPlayerId) || 0
+                const newPos = Math.min(FINISH_LINE, currentPos + 2)
 
-                        // We need to trigger win outside reducer to be safe with side effects
-                        setTimeout(() => {
-                            playWinFanfare()
-                            endGame(currentPlayerId)
-                        }, 0)
-                    }
-
-                    return {
-                        ...state,
-                        positions: new Map([...state.positions, [currentPlayerId, newPos]])
-                    }
-                })
+                dispatchGameEvent('MOVE_PLAYER', { pos: newPos })
             } else if (gameState.light === 'RED') {
                 // Violation
                 playFail()
                 setIsHolding(false)
-                updateGameState(state => ({
-                    ...state,
-                    positions: new Map([...state.positions, [currentPlayerId, 0]])
-                }))
+                dispatchGameEvent('MOVE_PLAYER', { pos: 0 })
             }
         }, 100)
 
         return () => clearInterval(interval)
-    }, [isPlaying, isHolding, gameState.light, currentPlayerId, updateGameState, endGame])
+    }, [isPlaying, isHolding, gameState.light, currentPlayerId, gameState.positions, dispatchGameEvent])
+
+    // Winner Check (Host)
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (!gameEndedRef.current && gameState.positions.size > 0) {
+            gameState.positions.forEach((pos, playerId) => {
+                if (pos >= FINISH_LINE && !gameEndedRef.current) {
+                    gameEndedRef.current = true
+                    playWinFanfare()
+                    endGame(playerId)
+                }
+            })
+        }
+    }, [gameState.positions, endGame, players, currentPlayerId])
 
     const handleDown = useCallback(() => setIsHolding(true), [])
     const handleUp = useCallback(() => setIsHolding(false), [])

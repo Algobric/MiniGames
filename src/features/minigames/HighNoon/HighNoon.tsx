@@ -28,6 +28,31 @@ const HighNoon = () => {
             shots: new Map(),
             misfires: new Set(),
             localPhase: 'WAIT'
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'HIGHNOON_SHOOT') {
+                const { timestamp } = event as any
+                const newShots = new Map(state.shots)
+                newShots.set(event.senderId, timestamp)
+                return { ...state, shots: newShots }
+            }
+            if (event.type === 'HIGHNOON_MISFIRE') {
+                const newMisfires = new Set(state.misfires)
+                newMisfires.add(event.senderId)
+                return { ...state, misfires: newMisfires }
+            }
+            if (event.type === 'HIGHNOON_SIGNAL') {
+                // Host sends signal? Or simple state update?
+                // The useEffect for DRAW signal uses `updateGameState`.
+                // Ideally Host sends a SIGNAL event.
+                // But `updateGameState` is local-only unless we sync state.
+                // If Host uses `updateGameState` to set `DRAW`, Clients DON'T SEE IT until Sync.
+                // Sync is 2s delay. Laggy draw signal!
+                // FIX: Host must dispatch 'HIGHNOON_SIGNAL'.
+                const { timestamp } = event as any
+                return { ...state, localPhase: 'DRAW', drawSignalTime: timestamp }
+            }
+            return state
         }
     })
 
@@ -56,27 +81,31 @@ const HighNoon = () => {
 
     // Schedule DRAW signal when game starts
     useEffect(() => {
-        if (!isPlaying || gameState.localPhase !== 'WAIT') return
+        // Only LEADER sends signal
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isPlaying || gameState.localPhase !== 'WAIT' || !isLeader) return
 
         const delay = 2000 + Math.random() * 3000
 
         timerRef.current = setTimeout(() => {
             playDrawSignal()
-            updateGameState(state => ({
-                ...state,
-                localPhase: 'DRAW',
-                drawSignalTime: Date.now()
-            }))
+            // Dispatch Signal
+            const now = Date.now()
+            dispatchGameEvent('HIGHNOON_SIGNAL', { timestamp: now })
         }, delay)
 
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current)
         }
-    }, [isPlaying, gameState.localPhase, updateGameState])
+    }, [isPlaying, gameState.localPhase, currentPlayerId, players, dispatchGameEvent])
 
     // Determine winner when someone shoots
     useEffect(() => {
         if (gameState.localPhase !== 'DRAW' || gameState.shots.size === 0 || winnerId) return
+
+        // Only Leader calculates winner to avoid race conditions
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
 
         const validShots = Array.from(gameState.shots.entries())
             .filter(([playerId]) => !gameState.misfires.has(playerId))
@@ -88,13 +117,19 @@ const HighNoon = () => {
                 ? shotTime - gameState.drawSignalTime
                 : 0
 
+            // updateGameState(state => ({ ...state, localPhase: 'RESOLVING' })) // Local update? 
+            // Better to just end game?
+            // "RESOLVING" is visual.
+            // Let's keep it. BUT updateGameState is local.
+            // Host receives Shot, sets Resolving. EndGame shortly after.
+
             updateGameState(state => ({ ...state, localPhase: 'RESOLVING' }))
             playWinFanfare()
             endGame(fastestPlayerId, [
                 { playerId: fastestPlayerId, score: 100, rank: 1, metadata: { reactionTime } }
             ])
         }
-    }, [gameState, winnerId, endGame, updateGameState])
+    }, [gameState, winnerId, endGame, updateGameState, players, currentPlayerId])
 
     const handleTap = useCallback(() => {
         if (!currentPlayerId || hasShotRef.current || winnerId) return
@@ -105,23 +140,15 @@ const HighNoon = () => {
 
         if (gameState.localPhase === 'WAIT') {
             playFail()
-            updateGameState(state => ({
-                ...state,
-                misfires: new Set([...state.misfires, currentPlayerId])
-            }))
             dispatchGameEvent('HIGHNOON_MISFIRE', { playerId: currentPlayerId })
             return
         }
 
         if (gameState.localPhase === 'DRAW') {
             playGunshot()
-            updateGameState(state => ({
-                ...state,
-                shots: new Map([...state.shots, [currentPlayerId, timestamp]])
-            }))
             dispatchGameEvent('HIGHNOON_SHOOT', { playerId: currentPlayerId, timestamp })
         }
-    }, [currentPlayerId, gameState, winnerId, updateGameState, dispatchGameEvent])
+    }, [currentPlayerId, gameState, winnerId, dispatchGameEvent])
 
     const bgColor = gameState.localPhase === 'DRAW'
         ? 'bg-red-700'

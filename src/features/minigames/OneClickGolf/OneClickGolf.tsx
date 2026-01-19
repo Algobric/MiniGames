@@ -22,7 +22,7 @@ interface ShotResult {
 interface OneClickGolfState {
     turnIndex: number
     results: Map<string, ShotResult> // playerId -> result
-    currentPhase: Phase
+    currentPhase: Phase // Shared phase
     shotData: { angle: number, power: number, playerId: string } | null
 }
 
@@ -37,6 +37,36 @@ const OneClickGolf = () => {
             results: new Map(),
             currentPhase: 'AIMING',
             shotData: null
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'INIT_GAME') {
+                return { ...state, turnIndex: 0, results: new Map(), currentPhase: 'AIMING', shotData: null }
+            }
+            if (event.type === 'NEXT_TURN') {
+                const { nextIndex, results } = event as any
+                // Update results if passed (usually passed incrementally)
+                const newResults = results ? new Map(results) as Map<string, ShotResult> : state.results
+                return {
+                    ...state,
+                    turnIndex: nextIndex,
+                    currentPhase: 'AIMING',
+                    shotData: null,
+                    results: newResults
+                }
+            }
+            if (event.type === 'START_FLIGHT') {
+                const { angle, power, playerId } = event as any
+                return {
+                    ...state,
+                    currentPhase: 'FLYING',
+                    shotData: { angle, power, playerId }
+                }
+            }
+            if (event.type === 'UPDATE_PHASE') {
+                const { phase } = event as any
+                return { ...state, currentPhase: phase }
+            }
+            return state
         }
     })
 
@@ -48,8 +78,8 @@ const OneClickGolf = () => {
         isPlaying,
         currentPlayerId,
         players,
-        updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -61,7 +91,14 @@ const OneClickGolf = () => {
     const [power, setPower] = useState(0)
     const [ballPos, setBallPos] = useState({ x: 50, y: 180 })
 
-    // Angle Oscillation
+    // Init (Host)
+    useEffect(() => {
+        if (isLeader && isPlaying && gameState.results.size === 0 && gameState.turnIndex === 0) {
+            // Ensure good start state? Already initialGameState.
+        }
+    }, [isLeader, isPlaying, gameState]) // Minimal check
+
+    // Angle Oscillation (Local for active player)
     useEffect(() => {
         if (gameState.currentPhase !== 'AIMING' || !isMyTurn) return
         const interval = setInterval(() => {
@@ -73,7 +110,7 @@ const OneClickGolf = () => {
         return () => clearInterval(interval)
     }, [gameState.currentPhase, isMyTurn])
 
-    // Power Oscillation
+    // Power Oscillation (Local for active player)
     useEffect(() => {
         if (gameState.currentPhase !== 'POWER' || !isMyTurn) return
         const interval = setInterval(() => {
@@ -85,7 +122,7 @@ const OneClickGolf = () => {
         return () => clearInterval(interval)
     }, [gameState.currentPhase, isMyTurn])
 
-    // Handle Shot Logic (When shotData changes in state)
+    // Handle Shot Logic (When shotData changes in state - Visuals for ALL)
     useEffect(() => {
         if (gameState.shotData) {
             const { angle, power, playerId } = gameState.shotData
@@ -97,11 +134,10 @@ const OneClickGolf = () => {
             const endY = 180 - Math.sin(rad) * distance
 
             // Animate (Visual)
-            // We can set ball pos directly for simple "jump" or use animation library.
             // Using React state for simplicity.
             setBallPos({ x: endX, y: endY })
 
-            // Wait for flight then Next Turn
+            // Wait for flight then Next Turn (HOST governed)
             if (isLeader && gameState.currentPhase === 'FLYING') {
                 const distToHole = Math.sqrt((endX - HOLE_X) ** 2 + (endY - HOLE_Y) ** 2)
                 const isHoleInOne = distToHole <= HOLE_RADIUS
@@ -111,60 +147,44 @@ const OneClickGolf = () => {
                     const nextTurn = gameState.turnIndex + 1
                     const finished = nextTurn >= players.length
 
-                    updateGameState(state => {
-                        const newResults = new Map(state.results)
-                        newResults.set(playerId, {
-                            distance: isHoleInOne ? 0 : distToHole,
-                            isHoleInOne
+                    const newResults = new Map(gameState.results)
+                    newResults.set(playerId, {
+                        distance: isHoleInOne ? 0 : distToHole,
+                        isHoleInOne
+                    })
+
+                    if (finished) {
+                        // End Game
+                        // Calculate winner
+                        let bestId = players[0].id
+                        let minDist = Infinity
+
+                        newResults.forEach((res, pid) => {
+                            if (res.distance < minDist) {
+                                minDist = res.distance
+                                bestId = pid
+                            }
                         })
 
-                        if (finished) {
-                            // Find Winner
-                            // Game ends via updateGameState side effect? No, trigger via useEffect.
-                            return {
-                                ...state,
-                                results: newResults,
-                                currentPhase: 'AIMING' // Reset phase for cleanliness 
-                            }
-                        } else {
-                            // Reset for next player
-                            return {
-                                ...state,
-                                turnIndex: nextTurn,
-                                currentPhase: 'AIMING',
-                                shotData: null
-                            }
-                        }
-                    })
+                        // We dispatch NEXT_TURN with logic to indicate end or we just endGame?
+                        // Ideally dispatch NEXT_TURN to sync final results THEN endGame.
+                        dispatchGameEvent('NEXT_TURN', { nextIndex: nextTurn, results: Array.from(newResults.entries()) })
+
+                        setTimeout(() => {
+                            if (bestId === currentPlayerId) playWinFanfare()
+                            endGame(bestId)
+                        }, 500)
+                    } else {
+                        // Next Player
+                        dispatchGameEvent('NEXT_TURN', { nextIndex: nextTurn, results: Array.from(newResults.entries()) })
+                    }
                 }, 2000)
             }
         } else {
             // Reset ball position if new turn
             setBallPos({ x: 50, y: 180 })
-            // Reset local power/angle?
-            // They are reset by the oscillation effect start.
         }
-    }, [gameState.shotData, isLeader, players.length, gameState.turnIndex, updateGameState])
-
-    // Check Game Over
-    useEffect(() => {
-        if (!isPlaying || !isLeader || winnerId) return
-
-        if (gameState.results.size === players.length && players.length > 0) {
-            let bestId = players[0].id
-            let minDist = Infinity
-
-            gameState.results.forEach((res, pid) => {
-                if (res.distance < minDist) {
-                    minDist = res.distance
-                    bestId = pid
-                }
-            })
-
-            if (bestId === currentPlayerId) playWinFanfare()
-            endGame(bestId)
-        }
-    }, [gameState.results, players, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+    }, [gameState.shotData, isLeader, players, gameState.turnIndex, currentPlayerId, endGame, dispatchGameEvent, gameState.results])
 
 
     const handleClick = useCallback(() => {
@@ -172,17 +192,15 @@ const OneClickGolf = () => {
 
         playTap()
         if (gameState.currentPhase === 'AIMING') {
-            updateGameState(state => ({ ...state, currentPhase: 'POWER' }))
+            // Local phase update for UI?
+            // Shared state update needed because everyone watches?
+            // Yes, spectators should see aiming -> power.
+            dispatchGameEvent('UPDATE_PHASE', { phase: 'POWER' })
         } else if (gameState.currentPhase === 'POWER') {
             // Commit Shot
-            // We need to send our LOCAL angle/power to state
-            updateGameState(state => ({
-                ...state,
-                currentPhase: 'FLYING',
-                shotData: { angle, power, playerId: currentPlayerId! }
-            }))
+            dispatchGameEvent('START_FLIGHT', { angle, power, playerId: currentPlayerId! })
         }
-    }, [isMyTurn, gameState.currentPhase, angle, power, currentPlayerId, updateGameState])
+    }, [isMyTurn, gameState.currentPhase, angle, power, currentPlayerId, dispatchGameEvent])
 
     return (
         <MinigameWrapper

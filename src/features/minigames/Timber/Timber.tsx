@@ -28,6 +28,37 @@ const Timber = () => {
         initialGameState: {
             branches: [],
             players: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'CHOP') {
+                const { side } = event as any
+                const p = state.players.get(event.senderId)
+                if (!p || !p.alive) return state
+
+                const currentBranch = state.branches[p.progress]
+                const nextPlayers = new Map(state.players)
+
+                // Check death (Collision with branch falling on your head)
+                // Or collision with branch AT your new location?
+                // Classic logic: If I chop LEFT, and there is a branch LEFT at bottom (now), I die?
+                // Wait, logic in previous code:
+                // if (currentBranch === side) { Die }
+                // currentBranch is branches[p.progress].
+                // If I am at 0. Branch[0] is above me.
+                // If I move to Side Left. And Branch[0] IS Left. I hit it. I die.
+                // This logic seems correct for "Don't move into a branch".
+
+                if (currentBranch === side) {
+                    nextPlayers.set(event.senderId, { ...p, side, alive: false })
+                    // Play local fail sound if it's me? 
+                    // Reducer is pure. Sound handled elsewhere? 
+                    // Or just state update.
+                } else {
+                    nextPlayers.set(event.senderId, { ...p, side, progress: p.progress + 1 })
+                }
+                return { ...state, players: nextPlayers }
+            }
+            return state
         }
     })
 
@@ -40,7 +71,8 @@ const Timber = () => {
         currentPlayerId,
         players,
         updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -82,8 +114,6 @@ const Timber = () => {
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
         } else if (allDead && players.length > 0) {
-            // Everyone died? No winner? Or last to die?
-            // Simplest: No winner.
             endGame(null)
         }
 
@@ -93,51 +123,20 @@ const Timber = () => {
     const handleChop = useCallback((side: Side) => {
         if (!isPlaying || !currentPlayerId) return
 
-        // Optimistic check?
-        // Need to check if branch kills me
-        // Current Branch to check is at `progress + 1`?
-        // Visually: Player is at bottom. Branches fall down.
-        // `branches[0]` is the one right above head? 
-        // No, `branches` is the static tree. `progress` is how many we chopped.
-        // If I chop, I remove bottom branch?
-        // Logically: `branches` is array of size 50.
-        // `progress` = 0. Next branch is `branches[0]`.
-        // If I move to Side X and Chop.
-        // If `branches[0]` is on Side X, I die?
-        // Usually Tree falls down. So if I am on Left, and branch is on Left, I die.
-        // BUT, the branch that kills you is the one coming DOWN.
-        // So at `progress=0`, I see `branches[0]` just above me?
-        // Let's say: `branches[i]` is the branch at height `i`.
-        // When I am at `progress=0`, I am safe. I chop.
-        // Tree falls. `branches[0]` is now at my feet (gone).
-        // `branches[1]` falls to my head level.
-        // So I must NOT be on the side of `branches[1]`.
-        // Wait, if I chop `branches[0]`, `branches[1]` falls.
-        // So BEFORE I chop, I must ensure `branches[1]` is not on my side?
-        // Actually, classic Timberman: You chop. If there is a branch on your side at the current level, you die.
-
-        updateGameState(state => {
-            const p = state.players.get(currentPlayerId)
-            if (!p || !p.alive) return state
-            const currentBranch = state.branches[p.progress]
-
-            // Check death collision
+        // Check locally for death to play sound immediately
+        const myP = gameState.players.get(currentPlayerId)
+        if (myP && myP.alive) {
+            const currentBranch = gameState.branches[myP.progress]
             if (currentBranch === side) {
-                // Die
                 playFail()
-                const nextPlayers = new Map(state.players)
-                nextPlayers.set(currentPlayerId, { ...p, side, alive: false })
-                return { ...state, players: nextPlayers }
+            } else {
+                playTap()
             }
+        }
 
-            // Chop success
-            playTap()
-            const nextPlayers = new Map(state.players)
-            nextPlayers.set(currentPlayerId, { ...p, side, progress: p.progress + 1 })
-            return { ...state, players: nextPlayers }
-        })
+        dispatchGameEvent('CHOP', { side })
 
-    }, [isPlaying, currentPlayerId, updateGameState])
+    }, [isPlaying, currentPlayerId, dispatchGameEvent, gameState.players, gameState.branches])
 
     const myState = gameState.players.get(currentPlayerId || '')
     const myProgress = myState?.progress || 0

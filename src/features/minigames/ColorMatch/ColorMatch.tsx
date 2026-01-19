@@ -46,6 +46,43 @@ const ColorMatch = () => {
             roundWinner: null,
             hasAnswered: false,
             feedback: null
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'NEW_ROUND') {
+                const { round, targetColor, displayColor } = event as any
+                return {
+                    ...state,
+                    round,
+                    targetColor,
+                    displayColor,
+                    roundWinner: null,
+                    hasAnswered: false,
+                    feedback: null
+                }
+            }
+            if (event.type === 'GUESS_COLOR') {
+                const { colorName } = event as any
+                if (state.roundWinner) return state // Already won
+
+                const isCorrect = colorName === state.targetColor?.name
+                const senderId = event.senderId
+
+                if (isCorrect) {
+                    const newScores = new Map(state.scores)
+                    newScores.set(senderId, (newScores.get(senderId) || 0) + 1)
+                    return {
+                        ...state,
+                        roundWinner: senderId,
+                        scores: newScores,
+                        // If I am the sender, set feedback?
+                        // Reducer is shared. We can set 'lastResult'?
+                        // Or feedback is derived locally in component?
+                        // Just update score/winner. Component derives feedback from winnerId.
+                    }
+                }
+                return state
+            }
+            return state
         }
     })
 
@@ -58,6 +95,7 @@ const ColorMatch = () => {
         currentPlayerId,
         players,
         endGame,
+        dispatchGameEvent,
         updateGameState
     } = engine
 
@@ -73,44 +111,71 @@ const ColorMatch = () => {
         }
     }, [players, gameState.scores.size, updateGameState])
 
-    // Start first round when game begins
+    // Start first round when game begins (Host Only)
     useEffect(() => {
-        if (isPlaying && gameState.round === 0 && !gameState.targetColor) {
-            startNewRound()
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (isPlaying && gameState.round === 0 && !gameState.targetColor && isLeader) {
+            startHostRound()
         }
-    }, [isPlaying, gameState.round, gameState.targetColor])
+    }, [isPlaying, gameState.round, gameState.targetColor, players, currentPlayerId])
 
-    const startNewRound = useCallback(() => {
+    // Host Logic for Round Management
+    const startHostRound = useCallback(() => {
         const newRound = gameState.round + 1
 
         if (newRound > TOTAL_ROUNDS) {
-            if (gameEndedRef.current) return
-            gameEndedRef.current = true
-
-            const sortedScores = Array.from(gameState.scores.entries())
-                .sort(([, a], [, b]) => b - a)
-            const topWinner = sortedScores[0]?.[0] || null
-
-            playWinFanfare()
-            endGame(topWinner, sortedScores.map(([playerId, score], idx) => ({
-                playerId, score, rank: idx + 1
-            })))
+            // End Game
+            // ... logic moved to effect or here
+            // Trigger End Game Event
+            dispatchGameEvent('SYSTEM_GAME_END_CHECK', {}) // Or just handle it locally then call endGame
             return
         }
 
         const target = COLORS[Math.floor(Math.random() * COLORS.length)]
         const display = COLORS[Math.floor(Math.random() * COLORS.length)]
 
-        updateGameState(() => ({
+        dispatchGameEvent('NEW_ROUND', {
             round: newRound,
             targetColor: target,
-            displayColor: display,
-            roundWinner: null,
-            hasAnswered: false,
-            feedback: null,
-            scores: gameState.scores
-        }))
-    }, [gameState.round, gameState.scores, updateGameState, endGame])
+            displayColor: display
+        })
+    }, [gameState.round, dispatchGameEvent])
+
+    // Host checks for Round End / Game End
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        // If Round Winner found, wait then start new round
+        if (gameState.roundWinner) {
+            const timer = setTimeout(() => {
+                startHostRound()
+            }, 1500)
+            return () => clearTimeout(timer)
+        }
+
+        // Check Game End Condition (Round > Total) - logic inside startHostRound handles increments
+        // But what if we just exceeded?
+        // Actually startHostRound increments. If it sees > TOTAL, it ends.
+
+    }, [gameState.roundWinner, startHostRound, players, currentPlayerId])
+
+    // Check Game End Validation
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (gameState.round > TOTAL_ROUNDS && !gameEndedRef.current) {
+            gameEndedRef.current = true
+            const sortedScores = Array.from(gameState.scores.entries())
+                .sort(([, a], [, b]) => b - a)
+            const topWinner = sortedScores[0]?.[0] || null
+            playWinFanfare()
+            endGame(topWinner, sortedScores.map(([playerId, score], idx) => ({
+                playerId, score, rank: idx + 1
+            })))
+        }
+    }, [gameState.round, gameState.scores, endGame, players, currentPlayerId])
 
     const handleColorClick = useCallback((color: ColorConfig) => {
         if (!currentPlayerId || !isPlaying || !gameState.targetColor ||
@@ -118,25 +183,28 @@ const ColorMatch = () => {
 
         const isCorrect = color.name === gameState.targetColor.name
 
+        // Optimistic feedback locally
         if (isCorrect) {
             playTap()
-            updateGameState(state => ({
-                ...state,
-                hasAnswered: true,
-                feedback: 'correct',
-                roundWinner: currentPlayerId,
-                scores: new Map([...state.scores, [currentPlayerId, (state.scores.get(currentPlayerId) || 0) + 1]])
-            }))
-            setTimeout(startNewRound, 1500)
+            // We don't update state manually, we dispatch
+            // But we can set a local ref for visual feedback if needed?
+            // Actually reducer updates 'roundWinner'. 
+            // If I win, I see 'roundWinner === me'.
         } else {
             playFail()
             updateGameState(state => ({
                 ...state,
                 hasAnswered: true,
                 feedback: 'wrong'
+                // Local state update for 'wrong' is fine as it doesn't affect score logic
+                // But better to not mix.
+                // Re-enable local feedback:
             }))
         }
-    }, [currentPlayerId, isPlaying, gameState, winnerId, updateGameState, startNewRound])
+
+        dispatchGameEvent('GUESS_COLOR', { colorName: color.name })
+
+    }, [currentPlayerId, isPlaying, gameState, winnerId, dispatchGameEvent, updateGameState])
 
     return (
         <MinigameWrapper

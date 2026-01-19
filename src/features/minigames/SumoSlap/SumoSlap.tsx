@@ -38,6 +38,25 @@ const SumoSlap = () => {
         initialGameState: {
             players: new Map(),
             aliveCount: 0
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'PUSH') {
+                const { x, y } = event as any // Direction vector
+                const p = state.players.get(event.senderId)
+                if (!p || !p.alive) return state
+
+                const nextPlayers = new Map(state.players)
+                const nextP = { ...p }
+
+                // Add velocity
+                nextP.vx += x * PUSH_FORCE
+                nextP.vy += y * PUSH_FORCE
+                nextP.mass += MASS_GAIN
+
+                nextPlayers.set(event.senderId, nextP)
+                return { ...state, players: nextPlayers }
+            }
+            return state
         }
     })
 
@@ -51,7 +70,8 @@ const SumoSlap = () => {
         players,
         updateGameState,
         endGame,
-        timeRemaining
+        timeRemaining,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -189,24 +209,9 @@ const SumoSlap = () => {
     // Controls
     const handlePush = useCallback((dir: { x: number, y: number }) => {
         if (!isPlaying || !currentPlayerId) return
-
         playTap()
-        updateGameState(state => {
-            const p = state.players.get(currentPlayerId)
-            if (!p || !p.alive) return state
-
-            const nextPlayers = new Map(state.players)
-            const nextP = { ...p }
-
-            // Add velocity
-            nextP.vx += dir.x * PUSH_FORCE
-            nextP.vy += dir.y * PUSH_FORCE
-            nextP.mass += MASS_GAIN // Get fatter as you move!
-
-            nextPlayers.set(currentPlayerId, nextP)
-            return { ...state, players: nextPlayers }
-        })
-    }, [isPlaying, currentPlayerId, updateGameState])
+        dispatchGameEvent('PUSH', dir)
+    }, [isPlaying, currentPlayerId, dispatchGameEvent])
 
 
     return (

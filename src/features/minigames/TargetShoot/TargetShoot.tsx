@@ -29,6 +29,25 @@ const TargetShoot = () => {
         initialGameState: {
             targets: [],
             scores: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'HIT_TARGET') {
+                const { targetId } = event as any
+                const target = state.targets.find(t => t.id === targetId)
+                if (!target) return state
+
+                const newScores = new Map(state.scores)
+                // Calculate score based on size (smaller = more points)
+                const points = Math.round(100 / target.size * 10)
+                newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + points)
+
+                return {
+                    ...state,
+                    targets: state.targets.filter(t => t.id !== targetId),
+                    scores: newScores
+                }
+            }
+            return state
         }
     })
 
@@ -42,7 +61,8 @@ const TargetShoot = () => {
         players,
         updateGameState,
         endGame,
-        timeRemaining
+        timeRemaining,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -79,26 +99,9 @@ const TargetShoot = () => {
 
     const handleHit = useCallback((t: Target) => {
         if (!isPlaying || !currentPlayerId) return
-
         playTap()
-        // Optimistic Remove? No, wait for state for fairness, but sound immediate.
-        // Actually, for responsiveness, we could hide locally?
-        // Let's just send update.
-        updateGameState(state => {
-            // Verify target still exists
-            if (!state.targets.find(tg => tg.id === t.id)) return state
-
-            const points = Math.round(100 / t.size * 10)
-            const newScores = new Map(state.scores)
-            newScores.set(currentPlayerId, (newScores.get(currentPlayerId) || 0) + points)
-
-            return {
-                ...state,
-                targets: state.targets.filter(tg => tg.id !== t.id),
-                scores: newScores
-            }
-        })
-    }, [isPlaying, currentPlayerId, updateGameState])
+        dispatchGameEvent('HIT_TARGET', { targetId: t.id })
+    }, [isPlaying, currentPlayerId, dispatchGameEvent])
 
     return (
         <MinigameWrapper

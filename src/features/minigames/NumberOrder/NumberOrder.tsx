@@ -28,6 +28,37 @@ const NumberOrder = () => {
             startTime: 0,
             finishTimes: new Map(),
             progress: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'SHUFFLE_NUMBERS') {
+                const { shuffled, startTime } = event as any
+                return {
+                    ...state,
+                    shuffledNumbers: shuffled,
+                    startTime,
+                    progress: new Map() // Reset progress
+                }
+            }
+            if (event.type === 'UPDATE_PROGRESS') {
+                const { progress } = event as any
+                const newProgress = new Map(state.progress)
+                newProgress.set(event.senderId, progress)
+
+                // Check finish
+                if (progress >= NUMBERS.length) {
+                    const finishTime = Date.now() - state.startTime
+                    const newFinishTimes = new Map(state.finishTimes)
+                    newFinishTimes.set(event.senderId, finishTime)
+                    return {
+                        ...state,
+                        progress: newProgress,
+                        finishTimes: newFinishTimes
+                    }
+                }
+
+                return { ...state, progress: newProgress }
+            }
+            return state
         }
     })
 
@@ -40,7 +71,7 @@ const NumberOrder = () => {
         currentPlayerId,
         players,
         endGame,
-        updateGameState
+        dispatchGameEvent
     } = engine
 
     const [nextNumber, setNextNumber] = useState(1)
@@ -51,14 +82,25 @@ const NumberOrder = () => {
     useEffect(() => {
         if (isPlaying && isLeader && gameState.shuffledNumbers.length === 0) {
             const shuffled = [...NUMBERS].sort(() => Math.random() - 0.5)
-            updateGameState(state => ({
-                ...state,
-                shuffledNumbers: shuffled,
-                startTime: Date.now(),
-                progress: new Map(players.map(p => [p.id, 0]))
-            }))
+            dispatchGameEvent('SHUFFLE_NUMBERS', { shuffled, startTime: Date.now() })
         }
-    }, [isPlaying, isLeader, gameState.shuffledNumbers.length, players, updateGameState])
+    }, [isPlaying, isLeader, gameState.shuffledNumbers.length, dispatchGameEvent])
+
+    // Winner Check (Host)
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (gameState.finishTimes.size > 0 && !gameEndedRef.current) {
+            const winner = Array.from(gameState.finishTimes.entries()).sort((a, b) => a[1] - b[1])[0]?.[0]
+            if (winner) {
+                gameEndedRef.current = true
+                playWinFanfare()
+                endGame(winner)
+            }
+        }
+    }, [gameState.finishTimes, endGame, players, currentPlayerId])
+
 
     const handleNumberClick = useCallback((num: number) => {
         if (!isPlaying || !currentPlayerId || winnerId || gameState.finishTimes.has(currentPlayerId)) return
@@ -68,33 +110,27 @@ const NumberOrder = () => {
             const newNext = nextNumber + 1
             setNextNumber(newNext)
 
-            // Sync progress occasionally or on every click? 
-            // Every click for this game is fine, it's not super high frequency (10 clicks)
-            updateGameState(state => ({
-                ...state,
-                progress: new Map([...state.progress, [currentPlayerId, newNext - 1]])
-            }))
+            // Local updates handled by state for responsiveness.
+            // Dispatch event for progress bar sync.
+            // Using last param to allow immediate update? No, gameReducer handles it.
 
-            if (newNext > NUMBERS.length) {
-                if (gameEndedRef.current) return
-                gameEndedRef.current = true
+            // We dispatch the NEW progress level (e.g. 1 if I clicked 1, 2 if I clicked 2)
+            // So progress = num.
 
-                const finishTime = Date.now() - gameState.startTime
-                playWinFanfare()
+            dispatchGameEvent('UPDATE_PROGRESS', { progress: num })
 
-                // First to finish wins immediately? Or wait? 
-                // Usually these races are "First one wins".
-                updateGameState(state => ({
-                    ...state,
-                    finishTimes: new Map([...state.finishTimes, [currentPlayerId, finishTime]])
-                }))
-
-                endGame(currentPlayerId)
-            }
         } else {
             playFail()
         }
-    }, [isPlaying, currentPlayerId, winnerId, nextNumber, gameState.startTime, gameState.finishTimes, updateGameState, endGame])
+    }, [isPlaying, currentPlayerId, winnerId, nextNumber, gameState.finishTimes, dispatchGameEvent])
+
+    // Reset local if game resets
+    useEffect(() => {
+        if (gameState.shuffledNumbers.length === 0) {
+            setNextNumber(1)
+            gameEndedRef.current = false
+        }
+    }, [gameState.shuffledNumbers])
 
     // Grid positions need to be stable based on shuffled numbers
     // But shuffledNumbers comes from state.

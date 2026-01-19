@@ -37,6 +37,47 @@ const MemoryFlash = () => {
             roundResults: new Map(),
             localPhase: 'SHOWING',
             flashButton: null
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'NEW_ROUND') {
+                const { round, sequence, alivePlayers } = event as any
+                // If alivePlayers provided (game start), usage. Else keep existing.
+                // Actually host should send alivePlayers to ensure consistency?
+                // Or we trust state.
+                // Let's reset results.
+                return {
+                    ...state,
+                    round,
+                    sequence,
+                    showingIndex: -1,
+                    playerInput: [],
+                    roundResults: new Map(),
+                    localPhase: 'SHOWING',
+                    flashButton: null,
+                    // If we want to sync alive players explicitly on new round:
+                    alivePlayers: alivePlayers ? new Set(alivePlayers) : state.alivePlayers
+                }
+            }
+            if (event.type === 'PLAYER_FAIL') {
+                const { round } = event as any
+                if (round !== state.round) return state
+
+                const newAlive = new Set(state.alivePlayers)
+                newAlive.delete(event.senderId)
+                const newResults = new Map(state.roundResults)
+                newResults.set(event.senderId, false)
+
+                return { ...state, alivePlayers: newAlive, roundResults: newResults }
+            }
+            if (event.type === 'PLAYER_SUCCESS') {
+                const { round } = event as any
+                if (round !== state.round) return state
+
+                const newResults = new Map(state.roundResults)
+                newResults.set(event.senderId, true)
+                return { ...state, roundResults: newResults }
+            }
+            return state
         }
     })
 
@@ -49,6 +90,7 @@ const MemoryFlash = () => {
         currentPlayerId,
         players,
         endGame,
+        dispatchGameEvent,
         updateGameState
     } = engine
 
@@ -56,9 +98,12 @@ const MemoryFlash = () => {
     const gameEndedRef = useRef(false)
     const isAlive = currentPlayerId ? gameState.alivePlayers.has(currentPlayerId) : false
 
-    // Initialize alive players
+    // Initialize alive players (Host Init)
     useEffect(() => {
         if (players.length > 0 && gameState.alivePlayers.size === 0) {
+            // Host sends initial round which includes alive players?
+            // Or we just set it locally for now waiting for round 1?
+            // Better: Init state locally matching players.
             updateGameState(state => ({
                 ...state,
                 alivePlayers: new Set(players.map(p => p.id))
@@ -66,33 +111,28 @@ const MemoryFlash = () => {
         }
     }, [players, gameState.alivePlayers.size, updateGameState])
 
-    // Start first round
+    // Start first round (Host Only)
     useEffect(() => {
-        if (isPlaying && gameState.round === 0 && gameState.sequence.length === 0) {
-            startNewRound(1, STARTING_LENGTH)
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (isPlaying && gameState.round === 0 && isLeader && players.length > 0) {
+            startHostRound(1, STARTING_LENGTH, players.map(p => p.id))
         }
-    }, [isPlaying, gameState.round, gameState.sequence.length])
+    }, [isPlaying, gameState.round, players, currentPlayerId]) // players dep ensures we have players
 
-    const startNewRound = useCallback((roundNum: number, length: number) => {
+    const startHostRound = useCallback((roundNum: number, length: number, currentAlive: string[]) => {
         const newSequence: number[] = []
         for (let i = 0; i < length; i++) {
             newSequence.push(Math.floor(Math.random() * 4))
         }
 
-        inputRef.current = []
-        updateGameState(() => ({
+        dispatchGameEvent('NEW_ROUND', {
             round: roundNum,
             sequence: newSequence,
-            showingIndex: -1,
-            playerInput: [],
-            roundResults: new Map(),
-            localPhase: 'SHOWING' as const,
-            flashButton: null,
-            alivePlayers: gameState.alivePlayers
-        }))
-    }, [gameState.alivePlayers, updateGameState])
+            alivePlayers: currentAlive
+        })
+    }, [dispatchGameEvent])
 
-    // Show sequence animation
+    // Show sequence animation (Client Side React to State Change)
     useEffect(() => {
         if (gameState.localPhase !== 'SHOWING' || gameState.sequence.length === 0 || !isPlaying) return
 
@@ -107,7 +147,7 @@ const MemoryFlash = () => {
                     setTimeout(showNext, 300)
                 }, 500)
             } else {
-                inputRef.current = []
+                inputRef.current = [] // Reset input ref
                 updateGameState(state => ({
                     ...state,
                     localPhase: 'INPUT' as const,
@@ -116,9 +156,75 @@ const MemoryFlash = () => {
             }
         }
 
-        const timeout = setTimeout(showNext, 500)
+        const timeout = setTimeout(showNext, 1000) // Small delay before start
         return () => clearTimeout(timeout)
-    }, [gameState.localPhase, gameState.sequence, isPlaying, updateGameState])
+    }, [gameState.sequence, isPlaying, updateGameState])
+    // removed gameState.localPhase from dep strictly to avoid re-trigger if logic changes phase elsewhere
+    // But we NEED it to trigger on phase change to SHOWING.
+    // 'sequence' acts as trigger too if it changes.
+    // The previous code had it. Let's keep strict deps but ensure logic doesn't infinite loop.
+
+    // Host Logic: Check for Round Completion
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        // Check if all alive players have submitted result
+        const aliveIds = Array.from(gameState.alivePlayers)
+        if (aliveIds.length === 0) return // Should not happen start of game
+
+        const allReported = aliveIds.every(id => gameState.roundResults.has(id))
+
+        if (allReported) {
+            // Calculate Next Step
+            const nextAlive = aliveIds.filter(id => gameState.roundResults.get(id) === true)
+
+            if (nextAlive.length <= 1) {
+                // Game End or Winner
+                // If 1 winner -> Winner.
+                // If 0 -> Draw (everyone died this round). OR Last Man Standing logic handled?
+                // If 0 nextAlive, it means everyone stored in 'alivePlayers' failed.
+                // So we check previous state? 
+                // If everyone failed simultaneously, maybe they tie? Or no winner?
+                // Simple: If nextAlive.length === 1, that one wins.
+                // If 0, No winner (or previous round survivor? hard to track).
+
+                // Wait, check if we reached MAX Rounds too.
+
+                const winner = nextAlive.length === 1 ? nextAlive[0] : null
+                // If 0 alive, winner is null.
+
+                if (!gameEndedRef.current) {
+                    gameEndedRef.current = true
+                    playWinFanfare()
+                    endGame(winner)
+                }
+            } else {
+                if (gameState.round >= MAX_LENGTH) {
+                    // End with multiple winners or Tie?
+                    // Just end.
+                    if (!gameEndedRef.current) {
+                        gameEndedRef.current = true
+                        playWinFanfare()
+                        endGame(null) // Tie
+                    }
+                } else {
+                    // Next Round
+                    // Dispatch Phase Change? No, NEW_ROUND resets everything.
+                    // But we should show RESULTS briefly.
+                    // We can't use 'localPhase' for Global Sync because 'localPhase' is local.
+                    // Unless we sync it?
+                    // Let's just wait and start new round. 
+                    // Clients see their result in 'roundResults'.
+                    setTimeout(() => {
+                        startHostRound(gameState.round + 1, STARTING_LENGTH + gameState.round, nextAlive)
+                    }, 2000)
+                }
+            }
+        }
+
+    }, [gameState.roundResults, gameState.alivePlayers, gameState.round, startHostRound, endGame, players, currentPlayerId])
+
 
     const handleButtonPress = useCallback((buttonIndex: number) => {
         if (gameState.localPhase !== 'INPUT' || !currentPlayerId || !isAlive || winnerId) return
@@ -127,48 +233,28 @@ const MemoryFlash = () => {
         updateGameState(state => ({ ...state, flashButton: buttonIndex }))
         setTimeout(() => updateGameState(state => ({ ...state, flashButton: null })), 100)
 
-        inputRef.current = [...inputRef.current, buttonIndex]
-        const currentPos = inputRef.current.length - 1
-        const isCorrect = gameState.sequence[currentPos] === buttonIndex
+        // Optimistic Input Update
+        const newInput = [...inputRef.current, buttonIndex]
+        inputRef.current = newInput
+        updateGameState(state => ({ ...state, playerInput: newInput }))
 
-        updateGameState(state => ({ ...state, playerInput: [...inputRef.current] }))
+        const currentPos = newInput.length - 1
+        const isCorrect = gameState.sequence[currentPos] === buttonIndex
 
         if (!isCorrect) {
             playFail()
-            updateGameState(state => ({
-                ...state,
-                alivePlayers: new Set([...state.alivePlayers].filter(id => id !== currentPlayerId)),
-                roundResults: new Map([...state.roundResults, [currentPlayerId, false]])
-            }))
-            checkRoundEnd()
-        } else if (inputRef.current.length === gameState.sequence.length) {
-            updateGameState(state => ({
-                ...state,
-                roundResults: new Map([...state.roundResults, [currentPlayerId, true]])
-            }))
-            checkRoundEnd()
+            // Dispatch Fail
+            dispatchGameEvent('PLAYER_FAIL', { round: gameState.round })
+            // Local lock
+            updateGameState(state => ({ ...state, localPhase: 'RESULT' as const })) // Or just stop input
+        } else if (newInput.length === gameState.sequence.length) {
+            // Success
+            dispatchGameEvent('PLAYER_SUCCESS', { round: gameState.round })
+            updateGameState(state => ({ ...state, localPhase: 'RESULT' as const }))
         }
-    }, [gameState, currentPlayerId, isAlive, winnerId, updateGameState])
+    }, [gameState, currentPlayerId, isAlive, winnerId, dispatchGameEvent, updateGameState])
 
-    const checkRoundEnd = useCallback(() => {
-        setTimeout(() => {
-            const alive = gameState.alivePlayers
-
-            if (alive.size <= 1 || gameState.round >= MAX_LENGTH) {
-                if (gameEndedRef.current) return
-                gameEndedRef.current = true
-
-                const winner = alive.size >= 1 ? [...alive][0] : null
-                playWinFanfare()
-                endGame(winner)
-            } else {
-                updateGameState(state => ({ ...state, localPhase: 'RESULT' as const }))
-                setTimeout(() => {
-                    startNewRound(gameState.round + 1, STARTING_LENGTH + gameState.round)
-                }, 2000)
-            }
-        }, 500)
-    }, [gameState.alivePlayers, gameState.round, updateGameState, startNewRound, endGame])
+    // Removed checkRoundEnd local function as it is now Host Driven via Effects
 
     return (
         <MinigameWrapper

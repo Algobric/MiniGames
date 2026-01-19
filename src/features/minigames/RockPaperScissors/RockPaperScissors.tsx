@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
+import { playTap, playWinFanfare } from '../HighNoon/sounds'
 
 type Choice = 'rock' | 'paper' | 'scissors' | null
 
@@ -40,6 +40,48 @@ const RockPaperScissors = () => {
             scores: new Map(),
             roundResult: null,
             chooseCountdown: 5
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'INIT_GAME') {
+                const { playerIds } = event as any
+                return {
+                    ...state,
+                    scores: new Map(playerIds.map((id: string) => [id, 0])),
+                    round: 1,
+                    localPhase: 'CHOOSING'
+                }
+            }
+            if (event.type === 'NEW_ROUND') {
+                return {
+                    ...state,
+                    round: state.round + 1,
+                    localPhase: 'CHOOSING',
+                    myChoice: null,
+                    choices: new Map(),
+                    roundResult: null,
+                    chooseCountdown: 5
+                }
+            }
+            if (event.type === 'SUBMIT_CHOICE') {
+                const { choice } = event as any
+                const newChoices = new Map(state.choices)
+                newChoices.set(event.senderId, choice)
+                return { ...state, choices: newChoices }
+            }
+            if (event.type === 'REVEAL_ROUND') {
+                const { result, scores } = event as any
+                const newScores = new Map(scores) as Map<string, number>
+                return {
+                    ...state,
+                    localPhase: 'REVEAL',
+                    roundResult: result,
+                    scores: newScores
+                }
+            }
+            if (event.type === 'TICK_COUNTDOWN') {
+                return { ...state, chooseCountdown: state.chooseCountdown - 1 }
+            }
+            return state
         }
     })
 
@@ -52,127 +94,127 @@ const RockPaperScissors = () => {
         currentPlayerId,
         players,
         endGame,
-        updateGameState
+        dispatchGameEvent
     } = engine
 
-    const gameEndedRef = useRef(false)
     const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const submittedRef = useRef(false)
 
-    // Initialize scores
+    // Initialize (Host)
     useEffect(() => {
-        if (players.length > 0 && gameState.scores.size === 0) {
-            updateGameState(state => ({
-                ...state,
-                scores: new Map(players.map(p => [p.id, 0]))
-            }))
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (players.length > 0 && gameState.scores.size === 0 && isPlaying && isLeader) {
+            dispatchGameEvent('INIT_GAME', { playerIds: players.map(p => p.id) })
         }
-    }, [players, gameState.scores.size, updateGameState])
+    }, [players, gameState.scores.size, isPlaying, currentPlayerId, dispatchGameEvent])
 
-    // Start first round
+    // Choosing countdown (Host managed ticks)
     useEffect(() => {
-        if (isPlaying && gameState.round === 0) {
-            startNewRound()
-        }
-    }, [isPlaying, gameState.round])
-
-    // Choosing countdown
-    useEffect(() => {
-        if (gameState.localPhase !== 'CHOOSING' || !isPlaying) return
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (gameState.localPhase !== 'CHOOSING' || !isPlaying || !isLeader || winnerId) return
 
         timerRef.current = setInterval(() => {
-            updateGameState(state => {
-                if (state.chooseCountdown <= 1) {
-                    if (timerRef.current) clearInterval(timerRef.current)
-                    // Auto-select random if not chosen
-                    if (!state.myChoice && currentPlayerId) {
-                        const randomChoice = CHOICES[Math.floor(Math.random() * 3)].id
-                        setTimeout(() => handleChoice(randomChoice!), 0)
-                    }
-                    return { ...state, chooseCountdown: 0 }
-                }
-                return { ...state, chooseCountdown: state.chooseCountdown - 1 }
-            })
+            if (gameState.chooseCountdown <= 1) {
+                if (timerRef.current) clearInterval(timerRef.current)
+            }
+            dispatchGameEvent('TICK_COUNTDOWN', {})
         }, 1000)
 
-        return () => {
-            if (timerRef.current) clearInterval(timerRef.current)
+        return () => { if (timerRef.current) clearInterval(timerRef.current) }
+    }, [gameState.localPhase, isPlaying, currentPlayerId, gameState.chooseCountdown, winnerId, dispatchGameEvent])
+
+    // Auto-Select random if time is up (Client side)
+    useEffect(() => {
+        if (gameState.localPhase === 'CHOOSING' && gameState.chooseCountdown === 0 && !submittedRef.current && isPlaying) {
+            const randomChoice = CHOICES[Math.floor(Math.random() * 3)].id
+            handleChoice(randomChoice)
         }
-    }, [gameState.localPhase, isPlaying, currentPlayerId])
+    }, [gameState.chooseCountdown, gameState.localPhase, isPlaying])
 
-    const startNewRound = useCallback(() => {
-        const newRound = gameState.round + 1
+    // Host Checks for Round Completion
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader || !isPlaying || gameState.localPhase !== 'CHOOSING') return
 
-        if (newRound > TOTAL_ROUNDS) {
-            if (gameEndedRef.current) return
-            gameEndedRef.current = true
+        const allChose = players.every(p => gameState.choices.has(p.id))
+        const timeUp = gameState.chooseCountdown === 0
 
-            const sortedScores = Array.from(gameState.scores.entries())
-                .sort(([, a], [, b]) => b - a)
-            const topWinner = sortedScores[0]?.[0] || null
+        if (allChose || timeUp) {
+            if (timeUp && !allChose) {
+                return
+            }
 
-            playWinFanfare()
-            endGame(topWinner)
-            return
+            if (allChose) {
+                revealRound()
+            }
+        }
+    }, [gameState.choices, gameState.chooseCountdown, gameState.localPhase, isPlaying, players, currentPlayerId]) // Added revealRound to deps via function ref or useCallback
+
+
+    const revealRound = useCallback(() => {
+        let roundResult = 'TIE!'
+        const newScores = new Map(gameState.scores)
+
+        const uniqueChoices = Array.from(new Set(gameState.choices.values()))
+
+        let winners: string[] = []
+
+        if (uniqueChoices.length === 1 || uniqueChoices.length === 3) {
+            roundResult = "TIE!"
+        } else if (uniqueChoices.length === 2 && uniqueChoices[0] && uniqueChoices[1]) {
+            const [c1, c2] = uniqueChoices as Choice[]
+            const c1Beats = CHOICES.find(c => c.id === c1)?.beats
+            const winnerChoice = c1Beats === c2 ? c1 : c2
+
+            players.forEach(p => {
+                if (gameState.choices.get(p.id) === winnerChoice) {
+                    newScores.set(p.id, (newScores.get(p.id) || 0) + 1)
+                    winners.push(p.id)
+                }
+            })
+
+            const winnerNames = players.filter(p => winners.includes(p.id)).map(p => p.username).join(', ')
+            roundResult = `${winnerNames} win(s)!`
         }
 
-        updateGameState(() => ({
-            round: newRound,
-            localPhase: 'CHOOSING' as const,
-            myChoice: null,
-            choices: new Map(),
-            roundResult: null,
-            chooseCountdown: 5,
-            scores: gameState.scores
-        }))
-    }, [gameState.round, gameState.scores, updateGameState, endGame])
+        dispatchGameEvent('REVEAL_ROUND', { result: roundResult, scores: Array.from(newScores.entries()) })
+
+        // Schedule Next Round
+        setTimeout(() => {
+            const nextRound = gameState.round + 1
+            if (nextRound > TOTAL_ROUNDS) {
+                // Game Over
+                const sortedScores = Array.from(newScores.entries()).sort((a, b) => b[1] - a[1])
+                const topWinner = sortedScores[0]?.[0]
+                playWinFanfare()
+                endGame(topWinner)
+            } else {
+                dispatchGameEvent('NEW_ROUND', {})
+                // Reset submitted ref for new round locally for checking?
+                // But we can't reset ref inside host logic easily for all clients.
+                // Clients observe NEW_ROUND event via reducer?
+                // No, clients need to reset THEIR submittedRef.
+            }
+        }, 3000)
+
+    }, [gameState.scores, gameState.choices, gameState.round, players, dispatchGameEvent, endGame])
+
+    // Reset submittedRef on new round
+    useEffect(() => {
+        if (gameState.localPhase === 'CHOOSING') {
+            submittedRef.current = false
+        }
+    }, [gameState.round])
+
 
     const handleChoice = useCallback((choice: Choice) => {
-        if (gameState.localPhase !== 'CHOOSING' || !currentPlayerId || gameState.myChoice || winnerId) return
+        if (gameState.localPhase !== 'CHOOSING' || !currentPlayerId || submittedRef.current || winnerId) return
 
         playTap()
-        updateGameState(state => {
-            const newChoices = new Map([...state.choices, [currentPlayerId, choice]])
+        submittedRef.current = true
+        dispatchGameEvent('SUBMIT_CHOICE', { choice })
 
-            // Check if all players chose
-            if (newChoices.size === players.length) {
-                setTimeout(() => revealChoices(newChoices), 500)
-            }
-
-            return { ...state, myChoice: choice, choices: newChoices }
-        })
-    }, [gameState.localPhase, gameState.myChoice, currentPlayerId, players.length, winnerId, updateGameState])
-
-    const revealChoices = useCallback((allChoices: Map<string, Choice>) => {
-        updateGameState(state => {
-            const playerIds = [...allChoices.keys()]
-            let roundResult = 'TIE!'
-            let newScores = new Map(state.scores)
-
-            if (playerIds.length === 2) {
-                const [p1, p2] = playerIds
-                const c1 = allChoices.get(p1)
-                const c2 = allChoices.get(p2)
-                const choice1 = CHOICES.find(c => c.id === c1)
-
-                if (c1 !== c2) {
-                    if (choice1?.beats === c2) {
-                        roundResult = `${players.find(p => p.id === p1)?.username} wins round!`
-                        newScores.set(p1, (newScores.get(p1) || 0) + 1)
-                        if (p1 === currentPlayerId) playWinFanfare()
-                        else playFail()
-                    } else {
-                        roundResult = `${players.find(p => p.id === p2)?.username} wins round!`
-                        newScores.set(p2, (newScores.get(p2) || 0) + 1)
-                        if (p2 === currentPlayerId) playWinFanfare()
-                        else playFail()
-                    }
-                }
-            }
-
-            setTimeout(startNewRound, 2500)
-            return { ...state, localPhase: 'REVEAL' as const, roundResult, scores: newScores }
-        })
-    }, [players, currentPlayerId, updateGameState, startNewRound])
+    }, [gameState.localPhase, currentPlayerId, winnerId, dispatchGameEvent])
 
     return (
         <MinigameWrapper
@@ -205,12 +247,19 @@ const RockPaperScissors = () => {
                                         whileHover={{ scale: 1.1 }}
                                         whileTap={{ scale: 0.9 }}
                                         onClick={() => handleChoice(choice.id)}
-                                        disabled={!!gameState.myChoice}
+                                        // disabled if I have already chosen (checked via map or ref)
+                                        disabled={submittedRef.current}
                                         className={clsx(
                                             "w-24 h-24 md:w-32 md:h-32 rounded-xl text-5xl md:text-6xl transition-all",
-                                            gameState.myChoice === choice.id
+                                            // Highlight ONLY if we want to show selection? 
+                                            // Usually secret until reveal.
+                                            // Maybe show selection only to me?
+                                            // Use local tracking or just don't show highlighting to keep it hidden?
+                                            // The original code showed highlighting.
+                                            // We can check gameState.choices for my ID
+                                            gameState.choices.get(currentPlayerId || '') === choice.id
                                                 ? "bg-green-600 border-4 border-green-400"
-                                                : gameState.myChoice
+                                                : submittedRef.current
                                                     ? "bg-gray-700 opacity-50"
                                                     : "bg-purple-700 hover:bg-purple-600"
                                         )}
@@ -219,7 +268,7 @@ const RockPaperScissors = () => {
                                     </motion.button>
                                 ))}
                             </div>
-                            {gameState.myChoice && (
+                            {submittedRef.current && (
                                 <div className="mt-4 text-green-400">Waiting for opponent...</div>
                             )}
                         </>

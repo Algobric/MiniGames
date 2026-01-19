@@ -32,6 +32,21 @@ export interface GameEndEvent extends BaseGameEvent {
     message?: string
 }
 
+export interface StateSyncEvent<T = any> extends BaseGameEvent {
+    type: 'SYSTEM_STATE_SYNC'
+    phase: MinigamePhase
+    timeRemaining: number | null
+    gameState: T
+    gameStartTime: number | null
+    countdown: number
+}
+
+export interface PhaseChangeEvent extends BaseGameEvent {
+    type: 'SYSTEM_PHASE_CHANGE'
+    phase: MinigamePhase
+    timestamp: number
+}
+
 export interface PlayerResult {
     playerId: string
     score: number

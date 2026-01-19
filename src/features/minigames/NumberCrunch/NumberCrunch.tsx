@@ -3,7 +3,7 @@
  * REFACTORED TO USE THE NEW GAME ENGINE.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
@@ -70,6 +70,38 @@ const NumberCrunch = () => {
         initialGameState: {
             currentProblem: null,
             scores: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'NEW_PROBLEM') {
+                const { problem } = event as any
+                return {
+                    ...state,
+                    currentProblem: problem
+                }
+            }
+            if (event.type === 'SOLVE_PROBLEM') {
+                const { score } = event as any
+                // Wait, score is derived. 1 point per solve?
+                // Or senderId gets +1?
+                // "SOLVE_PROBLEM" implies sender solved it.
+                // WE MUST CHECK IF PROBLEM IS STILL ACTIVE?
+                // If multiple people solve same problem?
+                // Usually "First" wins.
+                // The reducer receives events in order.
+                // We can add a "solved" flag to problem?
+                // Or just process it.
+                // If we want "First to solve gets unique point":
+
+                // Let's assume we allow multiple solves per problem if they are close, OR
+                // Check if problem ID matches?
+                // Let's keep it simple: Scores increment. 
+
+                const newScores = new Map(state.scores)
+                newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + 1)
+
+                return { ...state, scores: newScores }
+            }
+            return state
         }
     })
 
@@ -82,36 +114,39 @@ const NumberCrunch = () => {
         isPlaying,
         currentPlayerId,
         players,
-        updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent,
+        updateGameState
     } = engine
 
     const [feedback, setFeedback] = useState<'correct' | 'wrong' | null>(null)
     const [answered, setAnswered] = useState(false)
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
+    const problemRef = useRef<number>(0) // To dedupe sends?
 
-    // Game Over on Timeout
+    // Game Over on Timeout (Host)
     useEffect(() => {
-        if (!isPlaying || !isLeader || winnerId) return
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
 
-        if (timeRemaining !== null && timeRemaining <= 0) {
+        if (isPlaying && timeRemaining !== null && timeRemaining <= 0 && !winnerId) {
             const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
             const winner = sorted[0]?.[0] || null
             playWinFanfare()
             endGame(winner)
         }
-    }, [timeRemaining, isPlaying, isLeader, winnerId, gameState.scores, endGame])
+    }, [timeRemaining, isPlaying, winnerId, gameState.scores, endGame, players, currentPlayerId])
 
-    // Initialize scores and first problem
+    // Initialize/Regenerate Problems (Host)
     useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        // Start first problem
         if (isPlaying && isLeader && !gameState.currentProblem) {
-            updateGameState(state => ({
-                ...state,
-                currentProblem: generateProblem(),
-                scores: new Map(players.map(p => [p.id, 0]))
-            }))
+            const p = generateProblem()
+            dispatchGameEvent('NEW_PROBLEM', { problem: p })
         }
-    }, [isPlaying, isLeader, gameState.currentProblem, players, updateGameState])
+    }, [isPlaying, isLeader, gameState.currentProblem, dispatchGameEvent, players, currentPlayerId])
+
 
     // Detect when problem changes to reset local state
     useEffect(() => {
@@ -130,44 +165,58 @@ const NumberCrunch = () => {
 
         if (isCorrect) {
             playTap()
-            // Update score
-            updateGameState(state => ({
-                ...state,
-                scores: new Map([...state.scores, [currentPlayerId, (state.scores.get(currentPlayerId) || 0) + 1]])
-            }))
+            dispatchGameEvent('SOLVE_PROBLEM', {})
 
-            // Only leader generates new problem if THEY answer correctly? 
-            // Or anyone? 
-            // Actually, if it's a shared problem, usually whoever answers first gets the point and problem changes.
-            // BUT, usually in these games everyone solves the SAME problem LOCALLY or everyone races to solve ONE problem?
-            // The original implementation had "Next problem... if (isHost) setTimeout(generate, 500)".
-            // This implies a SHARED problem queue.
-            // So if I answer correctly, the problem changes for EVERYONE.
-            // This is "First to solve gets point".
-
-            if (isLeader) {
-                setTimeout(() => {
-                    updateGameState(state => ({ ...state, currentProblem: generateProblem() }))
-                }, 500)
-            } else {
-                // If I'm not leader, how do I trigger new problem? 
-                // I don't. The leader should subscribe to score changes or answers?
-                // Wait, `updateGameState` updates global state. 
-                // But generating a new problem is logic.
-                // Leader needs to observe that a correct answer happened.
-                // Actually, simpler: whoever answers correctly (client side check) calls updateGameState with NEW problem!
-                // Since `generateProblem` is deterministic enough or we don't care if it's Client valid.
-                // Yes, client can generate new problem and push it to state.
-                // Use `setTimeout` to avoid instant flicker.
-
-                setTimeout(() => {
-                    updateGameState(state => ({ ...state, currentProblem: generateProblem() }))
-                }, 500)
-            }
+            // If I solved it, I shouldn't generate new problem directly?
+            // Host should see I solved it and generate new one?
+            // OR I generate it if I am Host?
+            // Better: 'SOLVE_PROBLEM' event triggers a check on Host.
         } else {
             playFail()
         }
-    }, [isPlaying, currentPlayerId, gameState.currentProblem, answered, updateGameState, isLeader])
+    }, [isPlaying, currentPlayerId, gameState.currentProblem, answered, dispatchGameEvent])
+
+    // Host watches for Solves to generate new problem
+    // This is tricky. If multiple people solve, we might skip problems?
+    // Let's rely on Score Changes?
+    // If scores change, it means someone solved it.
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isPlaying || !isLeader) return
+
+        // We need to know if the CURRENT problem was solved.
+        // We can track total score?
+        // Or better: The EVENT 'SOLVE_PROBLEM' could be accompanied by a 'NEW_PROBLEM' event from Host?
+        // No, Host needs to react.
+
+        // Let's use a ref to track total score?
+        // Or simplier: If someone solves, we wait 500ms then New Problem.
+        // But how do we know someone solved it recently?
+        // We can check if 'answered' is true for us? No, that's local.
+
+        // Alternative: The Client who answers correctly ALSO dispatches 'NEW_PROBLEM' if they are Host?
+        // NO. Host Auth.
+
+        // Solution: Host observes `gameState.scores`. If it changes, trigger new problem.
+        // We need a ref to previous total score.
+    }, [gameState.scores])
+
+    // Actually, let's just make the Solved event trigger a new problem generation on Host side via `processEvent`?
+    // `useMinigameEngine` doesn't expose `processEvent` hook easily for logic extension without forking.
+
+    // Workaround: Host useEffect on scores.
+    const prevTotalScore = useRef(0)
+    useEffect(() => {
+        const total = Array.from(gameState.scores.values()).reduce((a, b) => a + b, 0)
+        if (total > prevTotalScore.current && isPlaying && isLeader) {
+            // Score increased! Someone solved it.
+            setTimeout(() => {
+                const p = generateProblem()
+                dispatchGameEvent('NEW_PROBLEM', { problem: p })
+            }, 500)
+        }
+        prevTotalScore.current = total
+    }, [gameState.scores, isPlaying, isLeader, dispatchGameEvent])
 
     return (
         <MinigameWrapper

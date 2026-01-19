@@ -49,6 +49,33 @@ const TankBattle = () => {
             tanks: new Map(),
             bullets: [],
             scores: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'TANK_UPDATE') {
+                const { x, y, angle } = event as any
+                const p = state.tanks.get(event.senderId)
+                if (!p) return state
+                const nextTanks = new Map(state.tanks)
+                nextTanks.set(event.senderId, { ...p, x, y, angle })
+                return { ...state, tanks: nextTanks }
+            }
+            if (event.type === 'TANK_SHOOT') {
+                const { id, x, y, angle, spawnTime } = event as any
+                const p = state.tanks.get(event.senderId)
+                if (!p) return state
+
+                const nextTanks = new Map(state.tanks)
+                nextTanks.set(event.senderId, { ...p, lastShot: spawnTime })
+
+                const nextBullets = [...state.bullets, {
+                    id,
+                    ownerId: event.senderId,
+                    x, y, angle, spawnTime
+                }]
+
+                return { ...state, tanks: nextTanks, bullets: nextBullets }
+            }
+            return state
         }
     })
 
@@ -62,12 +89,14 @@ const TankBattle = () => {
         players,
         updateGameState,
         endGame,
-        timeRemaining
+        timeRemaining,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const [localTank, setLocalTank] = useState<Tank | null>(null)
     const bulletIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+    const lastBroadcastRef = useRef<number>(0)
 
     // Init Tanks
     useEffect(() => {
@@ -88,10 +117,21 @@ const TankBattle = () => {
         }
     }, [players, isPlaying, gameState.tanks.size, updateGameState])
 
-    // Sync Local Tank from GameState initially and when needed
+    // Sync Local Tank from GameState initially and when needed (if drift is large or init)
     useEffect(() => {
-        if (currentPlayerId && gameState.tanks.has(currentPlayerId) && !localTank) {
-            setLocalTank(gameState.tanks.get(currentPlayerId)!)
+        if (currentPlayerId && gameState.tanks.has(currentPlayerId)) {
+            const serverTank = gameState.tanks.get(currentPlayerId)!
+            if (!localTank) {
+                setLocalTank(serverTank)
+            } else {
+                // Optional: Reconcile drift if too large?
+                // For now, let local input drive local state, and sync updates state.
+                // If we get hit/reset, state update handles it?
+                // gameState updates come from Reducer (our events) OR Host Sync.
+                // Host Sync might correct position.
+                // If Host Syncs, we should snap to it?
+                // This is complex. For now, rely on local inputs + frequent updates.
+            }
         }
     }, [currentPlayerId, gameState.tanks, localTank])
 
@@ -155,13 +195,8 @@ const TankBattle = () => {
         const alive = Array.from(gameState.tanks.values()).filter(t => t.health > 0)
 
         if (players.length > 1 && alive.length <= 1) {
-            // Last man standing wins, or highest score if simultaneous death?
             const sorted = [...gameState.scores.entries()].sort((a, b) => b[1] - a[1])
-            // If someone is alive, they win regardless of score (Survival Mode). 
-            // Or score based? Let's go with Score + Survival Bonus?
-            // Simple: Last alive wins.
             let winner = alive.length > 0 ? alive[0].id : sorted[0]?.[0]
-
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
         } else if (timeRemaining !== null && timeRemaining <= 0) {
@@ -182,22 +217,23 @@ const TankBattle = () => {
             if (now - localTank.lastShot < 500) return // Cooldown
 
             playGunshot()
-            // Optimistic update
+            // Dispatch Shoot
+            // Calc Bullet Start
+            const bx = localTank.x + Math.cos(localTank.angle * Math.PI / 180) * 25
+            const by = localTank.y + Math.sin(localTank.angle * Math.PI / 180) * 25
+            const bId = `b_${localTank.id}_${now}`
+
+            dispatchGameEvent('TANK_SHOOT', {
+                id: bId,
+                x: bx,
+                y: by,
+                angle: localTank.angle,
+                spawnTime: now
+            })
+
+            // Local optimistic update
             setLocalTank(prev => prev ? ({ ...prev, lastShot: now }) : null)
 
-            // Spawn Bullet
-            updateGameState(state => ({
-                ...state,
-                tanks: new Map(state.tanks).set(localTank.id, { ...localTank, lastShot: now }), // Sync cooldown
-                bullets: [...state.bullets, {
-                    id: `b_${localTank.id}_${now}`,
-                    ownerId: localTank.id,
-                    x: localTank.x + Math.cos(localTank.angle * Math.PI / 180) * 25,
-                    y: localTank.y + Math.sin(localTank.angle * Math.PI / 180) * 25,
-                    angle: localTank.angle,
-                    spawnTime: now
-                }]
-            }))
         } else {
             // Movement
             setLocalTank(prev => {
@@ -220,18 +256,17 @@ const TankBattle = () => {
 
                 const next = { ...prev, x, y, angle }
 
-                // Sync position (throttled/direct)
-                // For this game, direct update is okay if not spamming too hard. 
-                // Normally we'd throttle this. 
-                updateGameState(state => ({
-                    ...state,
-                    tanks: new Map(state.tanks).set(prev.id, next)
-                }))
+                // Throttle broadcast to 100ms
+                const now = Date.now()
+                if (now - lastBroadcastRef.current > 100) {
+                    lastBroadcastRef.current = now
+                    dispatchGameEvent('TANK_UPDATE', { x, y, angle })
+                }
 
                 return next
             })
         }
-    }, [isPlaying, localTank, updateGameState])
+    }, [isPlaying, localTank, dispatchGameEvent])
 
 
     const PLAYER_COLORS = ['#A3E635', '#60A5FA', '#F87171', '#FACC15']

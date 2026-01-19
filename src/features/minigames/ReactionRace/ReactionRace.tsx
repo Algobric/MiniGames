@@ -32,6 +32,44 @@ const ReactionRace = () => {
             roundWinner: null,
             hasClicked: false,
             myReactionTime: null
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'TARGET_SPAWN') {
+                const { timestamp } = event as any
+                return {
+                    ...state,
+                    localPhase: 'REACT',
+                    targetAppearTime: timestamp
+                }
+            }
+            if (event.type === 'TAP_TARGET') {
+                if (state.roundWinner) return state // Already won
+
+                const { timestamp } = event as any
+                const reaction = timestamp - state.targetAppearTime
+
+                const newScores = new Map(state.scores)
+                newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + 1)
+
+                return {
+                    ...state,
+                    roundWinner: event.senderId,
+                    scores: newScores
+                }
+            }
+            if (event.type === 'NEW_ROUND') {
+                const { round } = event as any
+                return {
+                    ...state,
+                    round,
+                    localPhase: 'WAITING',
+                    targetAppearTime: 0,
+                    roundWinner: null,
+                    hasClicked: false,
+                    myReactionTime: null
+                }
+            }
+            return state
         }
     })
 
@@ -44,6 +82,7 @@ const ReactionRace = () => {
         currentPlayerId,
         players,
         endGame,
+        dispatchGameEvent,
         updateGameState
     } = engine
 
@@ -56,7 +95,7 @@ const ReactionRace = () => {
         }
     }, [])
 
-    // Initialize scores
+    // Initialize scores when players are available
     useEffect(() => {
         if (players.length > 0 && gameState.scores.size === 0) {
             updateGameState(state => ({
@@ -66,49 +105,61 @@ const ReactionRace = () => {
         }
     }, [players, gameState.scores.size, updateGameState])
 
-    // Start first round
+    // Start first round (Host Only)
     useEffect(() => {
-        if (isPlaying && gameState.round === 0) {
-            startNewRound()
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (isPlaying && gameState.round === 0 && isLeader) {
+            startHostRound()
         }
-    }, [isPlaying, gameState.round])
+    }, [isPlaying, gameState.round, players, currentPlayerId])
 
-    const startNewRound = useCallback(() => {
+    // Host Round Logic
+    const startHostRound = useCallback(() => {
         const newRound = gameState.round + 1
 
         if (newRound > TOTAL_ROUNDS) {
-            if (gameEndedRef.current) return
-            gameEndedRef.current = true
-
-            const sortedScores = Array.from(gameState.scores.entries())
-                .sort(([, a], [, b]) => b - a)
-            const topWinner = sortedScores[0]?.[0] || null
-
-            playWinFanfare()
-            endGame(topWinner)
+            // Check Game End logic triggers in effect
+            dispatchGameEvent('SYSTEM_GAME_END_CHECK', {})
             return
         }
 
-        updateGameState(() => ({
-            round: newRound,
-            localPhase: 'WAITING' as const,
-            targetAppearTime: 0,
-            roundWinner: null,
-            hasClicked: false,
-            myReactionTime: null,
-            scores: gameState.scores
-        }))
+        dispatchGameEvent('NEW_ROUND', { round: newRound })
 
         const delay = 1500 + Math.random() * 3000
         timerRef.current = setTimeout(() => {
-            playTap()
-            updateGameState(state => ({
-                ...state,
-                localPhase: 'REACT' as const,
-                targetAppearTime: Date.now()
-            }))
+            dispatchGameEvent('TARGET_SPAWN', { timestamp: Date.now() })
         }, delay)
-    }, [gameState.round, gameState.scores, updateGameState, endGame])
+
+    }, [gameState.round, dispatchGameEvent])
+
+    // Host Handle Round Win -> Next Round
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (gameState.roundWinner) {
+            const timer = setTimeout(() => {
+                startHostRound()
+            }, 2000)
+            return () => clearTimeout(timer)
+        }
+    }, [gameState.roundWinner, startHostRound, players, currentPlayerId])
+
+    // Game End Check
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (gameState.round > TOTAL_ROUNDS && !gameEndedRef.current) {
+            gameEndedRef.current = true
+            const sortedScores = Array.from(gameState.scores.entries())
+                .sort(([, a], [, b]) => b - a)
+            const topWinner = sortedScores[0]?.[0] || null
+            playWinFanfare()
+            endGame(topWinner)
+        }
+    }, [gameState.round, gameState.scores, endGame, players, currentPlayerId])
+
 
     const handleClick = useCallback(() => {
         if (gameState.localPhase !== 'REACT' || !currentPlayerId ||
@@ -117,16 +168,12 @@ const ReactionRace = () => {
         const reactionTime = Date.now() - gameState.targetAppearTime
         playTap()
 
-        updateGameState(state => ({
-            ...state,
-            hasClicked: true,
-            myReactionTime: reactionTime,
-            roundWinner: currentPlayerId,
-            scores: new Map([...state.scores, [currentPlayerId, (state.scores.get(currentPlayerId) || 0) + 1]])
-        }))
+        // Optimistic local update (optional, mainly for 'hasClicked' UI)
+        updateGameState(state => ({ ...state, hasClicked: true, myReactionTime: reactionTime }))
 
-        setTimeout(startNewRound, 2000)
-    }, [gameState, currentPlayerId, winnerId, updateGameState, startNewRound])
+        dispatchGameEvent('TAP_TARGET', { timestamp: Date.now() })
+
+    }, [gameState, currentPlayerId, winnerId, updateGameState, dispatchGameEvent])
 
     return (
         <MinigameWrapper

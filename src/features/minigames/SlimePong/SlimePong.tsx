@@ -32,6 +32,31 @@ const SlimePong = () => {
             ball: { x: ARENA_WIDTH / 2, y: ARENA_HEIGHT / 2, vx: BALL_SPEED, vy: BALL_SPEED * 0.5, lastUpdate: Date.now() },
             paddles: [ARENA_HEIGHT / 2, ARENA_HEIGHT / 2],
             scores: [0, 0]
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'PADDLE_MOVE') {
+                const { y } = event as any
+                // Find player index
+                // We need 'players' here? No, we don't have access to context in reducer easily unless we pass it? 
+                // Wait, useMinigameEngine creates reducer. 
+                // We need to map senderId to index.
+                // WE CAN'T ACCESS 'players' ARRAY IN PURE REDUCER EASILY.
+                // We can put map logic in dispatch? Or store playerIds in state?
+                // PongState doesn't store playerIds.
+                // Let's rely on event.senderId. 
+                // But we don't know if they are P1 or P2 without the players array.
+                // PROBLEM.
+                // Solution: Store playerIds in PongState on init?
+                // OR: modify handleMove to send 'index'.
+
+                const { index } = event as any
+                const newPaddles = [...state.paddles]
+                if (typeof index === 'number' && index >= 0 && index < 2) {
+                    newPaddles[index] = y
+                }
+                return { ...state, paddles: newPaddles }
+            }
+            return state
         }
     })
 
@@ -44,7 +69,8 @@ const SlimePong = () => {
         currentPlayerId,
         players,
         updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent
     } = engine
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
@@ -120,11 +146,6 @@ const SlimePong = () => {
                     newVy = (Math.random() - 0.5) * BALL_SPEED
                 }
 
-                // Check Win
-                if (newScores.some(s => s >= WIN_SCORE)) {
-                    // Will be handled by effect
-                }
-
                 return {
                     ...state,
                     ball: {
@@ -182,22 +203,19 @@ const SlimePong = () => {
         }
     }, [gameState.scores, isPlaying, isLeader, winnerId, players, endGame])
 
-
     // Input Handling
     const handleMove = useCallback((direction: 'up' | 'down') => {
         if (!isPlaying || myIndex === -1) return
 
-        updateGameState(state => {
-            const newPaddles = [...state.paddles]
-            const currentY = newPaddles[myIndex]
-            const newY = direction === 'up'
-                ? Math.max(PADDLE_HEIGHT / 2, currentY - 20)
-                : Math.min(ARENA_HEIGHT - PADDLE_HEIGHT / 2, currentY + 20)
+        const currentY = gameState.paddles[myIndex]
+        const newY = direction === 'up'
+            ? Math.max(PADDLE_HEIGHT / 2, currentY - 20)
+            : Math.min(ARENA_HEIGHT - PADDLE_HEIGHT / 2, currentY + 20)
 
-            newPaddles[myIndex] = newY
-            return { ...state, paddles: newPaddles }
-        })
-    }, [isPlaying, myIndex, updateGameState])
+        // Dispatch event
+        dispatchGameEvent('PADDLE_MOVE', { y: newY, index: myIndex })
+
+    }, [isPlaying, myIndex, gameState.paddles, dispatchGameEvent])
 
     const scale = 1.0
 

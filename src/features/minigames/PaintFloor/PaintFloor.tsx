@@ -22,6 +22,18 @@ const PaintFloor = () => {
         },
         initialGameState: {
             grid: new Map()
+        },
+        gameReducer: (state, event) => {
+            if (event.type === 'PAINT_CELL') {
+                const { row, col } = event as any
+                const cellKey = `${row},${col}`
+
+                // Allow overwriting opponents? Yes.
+                const newGrid = new Map(state.grid)
+                newGrid.set(cellKey, event.senderId)
+                return { ...state, grid: newGrid }
+            }
+            return state
         }
     })
 
@@ -34,18 +46,21 @@ const PaintFloor = () => {
         isPlaying,
         currentPlayerId,
         players,
-        updateGameState,
-        endGame
+        endGame,
+        dispatchGameEvent,
+        updateGameState
     } = engine
 
-    const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const containerRef = useRef<HTMLDivElement>(null)
     const isDrawingRef = useRef(false)
     const gameEndedRef = useRef(false)
 
-    // Game Over
+    // Game Over (Host)
     useEffect(() => {
-        if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
+        if (!isPlaying || winnerId || gameEndedRef.current) return
 
         if (timeRemaining !== null && timeRemaining <= 0) {
             gameEndedRef.current = true
@@ -69,21 +84,26 @@ const PaintFloor = () => {
             if (bestId === currentPlayerId) playWinFanfare()
             endGame(bestId)
         }
-    }, [timeRemaining, isPlaying, isLeader, winnerId, gameState.grid, players, currentPlayerId, endGame])
+    }, [timeRemaining, isPlaying, winnerId, gameState.grid, players, currentPlayerId, endGame])
 
 
     const paintCell = useCallback((row: number, col: number) => {
         if (!isPlaying || !currentPlayerId) return
         const cellKey = `${row},${col}`
 
-        // Optimistic check to avoid spamming
+        // Optimistic check to avoid spamming if I already own it
         if (gameState.grid.get(cellKey) === currentPlayerId) return
 
+        // Dispatch
+        dispatchGameEvent('PAINT_CELL', { row, col })
+
+        // Optimistic Update
         updateGameState(state => ({
             ...state,
             grid: new Map([...state.grid, [cellKey, currentPlayerId]])
         }))
-    }, [isPlaying, currentPlayerId, gameState.grid, updateGameState])
+
+    }, [isPlaying, currentPlayerId, gameState.grid, dispatchGameEvent, updateGameState])
 
     const handlePointerMove = useCallback((e: React.PointerEvent) => {
         if (!isDrawingRef.current || !isPlaying) return

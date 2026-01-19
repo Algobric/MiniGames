@@ -22,7 +22,18 @@ const ButtonMash = () => {
         initialGameState: {
             tapCounts: new Map()
         },
-        gameDuration: GAME_DURATION
+        gameDuration: GAME_DURATION,
+        gameReducer: (state, event) => {
+            if (event.type === 'MASH_TAP') {
+                // Optimization: Handle multiple taps if packet aggregation used later
+                const count = (event as any).count || 1
+                const current = state.tapCounts.get(event.senderId) || 0
+                const newCounts = new Map(state.tapCounts)
+                newCounts.set(event.senderId, current + count)
+                return { ...state, tapCounts: newCounts }
+            }
+            return state
+        }
     })
 
     const {
@@ -35,6 +46,7 @@ const ButtonMash = () => {
         currentPlayerId,
         players,
         endGame,
+        dispatchGameEvent,
         updateGameState
     } = engine
 
@@ -53,6 +65,10 @@ const ButtonMash = () => {
 
     // Check if game should end
     useEffect(() => {
+        // Only Leader ends game
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
         if (isPlaying && timeRemaining !== null && timeRemaining <= 0 && !gameEndedRef.current) {
             gameEndedRef.current = true
 
@@ -68,25 +84,18 @@ const ButtonMash = () => {
                 })))
             }
         }
-    }, [isPlaying, timeRemaining, gameState.tapCounts, endGame])
+    }, [isPlaying, timeRemaining, gameState.tapCounts, endGame, players, currentPlayerId])
 
     const handleTap = useCallback(() => {
         if (!isPlaying || !currentPlayerId || winnerId) return
 
         myTapsRef.current++
         playTap()
-
-        updateGameState(state => ({
-            ...state,
-            tapCounts: new Map([
-                ...state.tapCounts,
-                [currentPlayerId, myTapsRef.current]
-            ])
-        }))
+        dispatchGameEvent('MASH_TAP', { count: 1 })
 
         screenShakeRef.current = true
         setTimeout(() => { screenShakeRef.current = false }, 50)
-    }, [isPlaying, currentPlayerId, winnerId, updateGameState])
+    }, [isPlaying, currentPlayerId, winnerId, dispatchGameEvent])
 
     const sortedPlayers = [...players].sort((a, b) =>
         (gameState.tapCounts.get(b.id) || 0) - (gameState.tapCounts.get(a.id) || 0)
