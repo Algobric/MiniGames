@@ -130,9 +130,8 @@ const HighNoon = () => {
             dispatchGameEvent('HIGHNOON_SIGNAL', { timestamp: now })
         }, delay)
 
-        return () => {
-            if (timerRef.current) clearTimeout(timerRef.current)
-        }
+        // NO CLEANUP HERE - the unmount effect handles cleanup
+        // Cleanup here would cancel the timer when deps change!
     }, [isPlaying, gameState.localPhase, currentPlayerId, players, winnerId, dispatchGameEvent])
 
     // Determine winner when someone shoots (LEADER ONLY)
