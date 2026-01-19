@@ -88,12 +88,14 @@ const HighNoon = () => {
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const hasShotRef = useRef(false)
     const gameEndedRef = useRef(false)
+    const signalScheduledRef = useRef(false)
 
     // Reset refs when game starts
     useEffect(() => {
         if (isPlaying) {
             hasShotRef.current = false
             gameEndedRef.current = false
+            signalScheduledRef.current = false
         }
     }, [isPlaying])
 
@@ -106,13 +108,20 @@ const HighNoon = () => {
 
     // Schedule DRAW signal when game starts (LEADER ONLY)
     useEffect(() => {
+        // Already scheduled? Skip
+        if (signalScheduledRef.current) return
+
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
 
         if (!isPlaying || gameState.localPhase !== 'WAIT' || !isLeader || winnerId) return
 
+        // Mark as scheduled BEFORE setting timeout
+        signalScheduledRef.current = true
+
         console.log('[HIGHNOON] Leader scheduling DRAW signal...')
 
-        const delay = 2000 + Math.random() * 3000
+        // Random delay between 6-12 seconds
+        const delay = 6000 + Math.random() * 6000
 
         timerRef.current = setTimeout(() => {
             console.log('[HIGHNOON] Leader sending DRAW signal!')
