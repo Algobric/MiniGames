@@ -2,9 +2,8 @@
  * HighNoon - Cowboy Standoff Game
  * 
  * FIXED VERSION using the modular game engine.
- * - Fixed dark screen issue (was waiting forever)
- * - Fixed stuck STEADY (leader detection + SIGNAL dispatch)
- * - Fixed misfire freeze (ends game when all disqualified)
+ * - Uses arrays instead of Map/Set for sync compatibility
+ * - Fixed dark screen, stuck STEADY, and misfire freeze
  */
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -13,13 +12,22 @@ import { motion, AnimatePresence } from 'framer-motion'
 import clsx from 'clsx'
 import { playGunshot, playDrawSignal, playWinFanfare, playFail } from './sounds'
 
-// ===== GAME STATE =====
+// ===== GAME STATE (using arrays for sync compatibility) =====
+interface Shot {
+    playerId: string
+    timestamp: number
+}
+
 interface HighNoonState {
     drawSignalTime: number | null
-    shots: Map<string, number>
-    misfires: Set<string>
+    shots: Shot[]  // Array instead of Map
+    misfires: string[]  // Array instead of Set
     localPhase: 'WAIT' | 'DRAW' | 'RESOLVING'
 }
+
+// Helper functions
+const hasMisfired = (misfires: string[], playerId: string) => misfires.includes(playerId)
+const hasShot = (shots: Shot[], playerId: string) => shots.some(s => s.playerId === playerId)
 
 // ===== THE COMPONENT =====
 const HighNoon = () => {
@@ -27,21 +35,31 @@ const HighNoon = () => {
         config: { countdownDuration: 3 },
         initialGameState: {
             drawSignalTime: null,
-            shots: new Map(),
-            misfires: new Set(),
+            shots: [],
+            misfires: [],
             localPhase: 'WAIT'
         },
         gameReducer: (state, event) => {
+            // Ensure arrays exist (in case of sync issues)
+            const shots = Array.isArray(state.shots) ? state.shots : []
+            const misfires = Array.isArray(state.misfires) ? state.misfires : []
+
             if (event.type === 'HIGHNOON_SHOOT') {
                 const { timestamp } = event as any
-                const newShots = new Map(state.shots)
-                newShots.set(event.senderId, timestamp)
-                return { ...state, shots: newShots }
+                // Only add if not already shot
+                if (hasShot(shots, event.senderId)) return state
+                return {
+                    ...state,
+                    shots: [...shots, { playerId: event.senderId, timestamp }]
+                }
             }
             if (event.type === 'HIGHNOON_MISFIRE') {
-                const newMisfires = new Set(state.misfires)
-                newMisfires.add(event.senderId)
-                return { ...state, misfires: newMisfires }
+                // Only add if not already misfired
+                if (hasMisfired(misfires, event.senderId)) return state
+                return {
+                    ...state,
+                    misfires: [...misfires, event.senderId]
+                }
             }
             if (event.type === 'HIGHNOON_SIGNAL') {
                 const { timestamp } = event as any
@@ -62,6 +80,10 @@ const HighNoon = () => {
         dispatchGameEvent,
         endGame
     } = engine
+
+    // Ensure arrays exist for safety
+    const shots = Array.isArray(gameState.shots) ? gameState.shots : []
+    const misfires = Array.isArray(gameState.misfires) ? gameState.misfires : []
 
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const hasShotRef = useRef(false)
@@ -84,7 +106,6 @@ const HighNoon = () => {
 
     // Schedule DRAW signal when game starts (LEADER ONLY)
     useEffect(() => {
-        // Calculate isLeader dynamically every render to avoid stale closure
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
 
         if (!isPlaying || gameState.localPhase !== 'WAIT' || !isLeader || winnerId) return
@@ -111,26 +132,27 @@ const HighNoon = () => {
 
         if (gameState.localPhase !== 'DRAW' || winnerId || gameEndedRef.current) return
         if (!isLeader) return
+        if (shots.length === 0) return
 
-        // Check if we have any valid shots
-        const validShots = Array.from(gameState.shots.entries())
-            .filter(([playerId]) => !gameState.misfires.has(playerId))
-            .sort(([, a], [, b]) => a - b)
+        // Get valid shots (not misfired)
+        const validShots = shots
+            .filter(s => !hasMisfired(misfires, s.playerId))
+            .sort((a, b) => a.timestamp - b.timestamp)
 
         if (validShots.length > 0) {
             gameEndedRef.current = true
-            const [fastestPlayerId, shotTime] = validShots[0]
+            const fastest = validShots[0]
             const reactionTime = gameState.drawSignalTime
-                ? shotTime - gameState.drawSignalTime
+                ? fastest.timestamp - gameState.drawSignalTime
                 : 0
 
-            console.log('[HIGHNOON] Winner determined:', fastestPlayerId, 'reaction:', reactionTime)
+            console.log('[HIGHNOON] Winner determined:', fastest.playerId, 'reaction:', reactionTime)
             playWinFanfare()
-            endGame(fastestPlayerId, [
-                { playerId: fastestPlayerId, score: 100, rank: 1, metadata: { reactionTime } }
+            endGame(fastest.playerId, [
+                { playerId: fastest.playerId, score: 100, rank: 1, metadata: { reactionTime } }
             ])
         }
-    }, [gameState.shots, gameState.localPhase, gameState.misfires, gameState.drawSignalTime, winnerId, endGame, players, currentPlayerId])
+    }, [shots, gameState.localPhase, misfires, gameState.drawSignalTime, winnerId, endGame, players, currentPlayerId])
 
     // Check for game end when all players misfired
     useEffect(() => {
@@ -141,17 +163,17 @@ const HighNoon = () => {
         if (players.length === 0) return
 
         // Check if ALL players have misfired
-        const allMisfired = players.every(p => gameState.misfires.has(p.id))
+        const allMisfired = players.every(p => hasMisfired(misfires, p.id))
 
         if (allMisfired) {
             console.log('[HIGHNOON] All players misfired! No winner.')
             gameEndedRef.current = true
             playFail()
-            endGame(null) // No winner
+            endGame(null)
         }
-    }, [gameState.misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
+    }, [misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
 
-    // Check for single remaining player after misfire (also ends game)
+    // Check for single remaining player after misfire
     useEffect(() => {
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
 
@@ -159,10 +181,9 @@ const HighNoon = () => {
         if (!isLeader) return
         if (players.length < 2) return
 
-        // If only one player hasn't misfired, they win
-        const validPlayers = players.filter(p => !gameState.misfires.has(p.id))
+        const validPlayers = players.filter(p => !hasMisfired(misfires, p.id))
 
-        if (validPlayers.length === 1 && gameState.misfires.size > 0) {
+        if (validPlayers.length === 1 && misfires.length > 0) {
             console.log('[HIGHNOON] Only one player remaining:', validPlayers[0].id)
             gameEndedRef.current = true
             playWinFanfare()
@@ -170,17 +191,16 @@ const HighNoon = () => {
                 { playerId: validPlayers[0].id, score: 100, rank: 1, metadata: { byDefault: true } }
             ])
         }
-    }, [gameState.misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
+    }, [misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
 
     const handleTap = useCallback(() => {
         if (!currentPlayerId || hasShotRef.current || winnerId) return
-        if (gameState.misfires.has(currentPlayerId)) return
+        if (hasMisfired(misfires, currentPlayerId)) return
 
         hasShotRef.current = true
         const timestamp = Date.now()
 
         if (gameState.localPhase === 'WAIT') {
-            // TOO EARLY - misfire!
             console.log('[HIGHNOON] Misfire!')
             playFail()
             dispatchGameEvent('HIGHNOON_MISFIRE', { playerId: currentPlayerId })
@@ -188,22 +208,21 @@ const HighNoon = () => {
         }
 
         if (gameState.localPhase === 'DRAW') {
-            // Valid shot
             console.log('[HIGHNOON] Shot fired!')
             playGunshot()
             dispatchGameEvent('HIGHNOON_SHOOT', { playerId: currentPlayerId, timestamp })
         }
-    }, [currentPlayerId, gameState.localPhase, gameState.misfires, winnerId, dispatchGameEvent])
+    }, [currentPlayerId, gameState.localPhase, misfires, winnerId, dispatchGameEvent])
 
     // Background color based on state
     const bgColor = gameState.localPhase === 'DRAW'
         ? 'bg-red-700'
-        : gameState.misfires.has(currentPlayerId ?? '')
+        : hasMisfired(misfires, currentPlayerId ?? '')
             ? 'bg-yellow-600'
             : 'bg-gradient-to-b from-amber-900 to-amber-800'
 
     const getMessage = () => {
-        if (gameState.misfires.has(currentPlayerId ?? '')) return '💀 TOO EARLY!'
+        if (hasMisfired(misfires, currentPlayerId ?? '')) return '💀 TOO EARLY!'
         if (gameState.localPhase === 'WAIT') return 'STEADY...'
         if (gameState.localPhase === 'DRAW') return '🔥 FIRE! 🔥'
         if (gameState.localPhase === 'RESOLVING') return '🏆 WINNER!'
@@ -236,19 +255,16 @@ const HighNoon = () => {
 
                 {/* Game Area */}
                 <div className="flex-1 w-full flex items-center justify-center relative">
-                    {/* Ground */}
                     <div className="absolute bottom-0 left-0 right-0 h-1/4 bg-gradient-to-t from-amber-800 to-amber-700" />
-                    {/* Sun */}
                     <div
                         className="absolute top-8 right-8 w-16 h-16 rounded-full bg-yellow-400 opacity-80"
                         style={{ boxShadow: '0 0 40px #FFD700' }}
                     />
 
-                    {/* Players */}
                     <div className="relative w-full max-w-4xl h-64 flex items-end justify-between px-8 md:px-16">
                         {players.slice(0, 2).map((player, idx) => {
-                            const hasMisfired = gameState.misfires.has(player.id)
-                            const hasShot = gameState.shots.has(player.id)
+                            const playerMisfired = hasMisfired(misfires, player.id)
+                            const playerShot = hasShot(shots, player.id)
                             const isMe = player.id === currentPlayerId
 
                             return (
@@ -256,9 +272,9 @@ const HighNoon = () => {
                                     key={player.id}
                                     className="flex flex-col items-center"
                                     animate={{
-                                        y: hasMisfired ? 20 : 0,
-                                        rotate: hasMisfired ? (idx === 0 ? 45 : -45) : 0,
-                                        opacity: hasMisfired ? 0.5 : 1
+                                        y: playerMisfired ? 20 : 0,
+                                        rotate: playerMisfired ? (idx === 0 ? 45 : -45) : 0,
+                                        opacity: playerMisfired ? 0.5 : 1
                                     }}
                                 >
                                     <div className={clsx(
@@ -270,9 +286,9 @@ const HighNoon = () => {
                                         {player.username}
                                     </div>
                                     <div className="text-6xl md:text-8xl">
-                                        {hasMisfired ? '💀' : hasShot ? '💥' : '🤠'}
+                                        {playerMisfired ? '💀' : playerShot ? '💥' : '🤠'}
                                     </div>
-                                    {hasMisfired && (
+                                    {playerMisfired && (
                                         <div className="text-xs text-red-400 mt-1">DISQUALIFIED</div>
                                     )}
                                 </motion.div>
@@ -284,7 +300,7 @@ const HighNoon = () => {
                 {/* Instructions */}
                 <div className="pb-8 text-center z-10">
                     <div className="text-lg md:text-xl font-mono text-white/90">
-                        {gameState.misfires.has(currentPlayerId ?? '') ? (
+                        {hasMisfired(misfires, currentPlayerId ?? '') ? (
                             <span className="text-yellow-300">DISQUALIFIED - TOO EARLY!</span>
                         ) : gameState.localPhase === 'WAIT' ? (
                             <span className="animate-pulse">WAIT FOR THE SIGNAL...</span>
