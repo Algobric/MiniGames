@@ -1,8 +1,10 @@
 /**
  * HighNoon - Cowboy Standoff Game
  * 
- * REFACTORED TO USE THE NEW GAME ENGINE.
- * No more host/guest distinction in game logic!
+ * FIXED VERSION using the modular game engine.
+ * - Fixed dark screen issue (was waiting forever)
+ * - Fixed stuck STEADY (leader detection + SIGNAL dispatch)
+ * - Fixed misfire freeze (ends game when all disqualified)
  */
 
 import { useEffect, useRef, useCallback } from 'react'
@@ -42,13 +44,6 @@ const HighNoon = () => {
                 return { ...state, misfires: newMisfires }
             }
             if (event.type === 'HIGHNOON_SIGNAL') {
-                // Host sends signal? Or simple state update?
-                // The useEffect for DRAW signal uses `updateGameState`.
-                // Ideally Host sends a SIGNAL event.
-                // But `updateGameState` is local-only unless we sync state.
-                // If Host uses `updateGameState` to set `DRAW`, Clients DON'T SEE IT until Sync.
-                // Sync is 2s delay. Laggy draw signal!
-                // FIX: Host must dispatch 'HIGHNOON_SIGNAL'.
                 const { timestamp } = event as any
                 return { ...state, localPhase: 'DRAW', drawSignalTime: timestamp }
             }
@@ -65,31 +60,42 @@ const HighNoon = () => {
         currentPlayerId,
         players,
         dispatchGameEvent,
-        endGame,
-        updateGameState
+        endGame
     } = engine
 
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const hasShotRef = useRef(false)
+    const gameEndedRef = useRef(false)
 
+    // Reset refs when game starts
     useEffect(() => {
-        hasShotRef.current = false
+        if (isPlaying) {
+            hasShotRef.current = false
+            gameEndedRef.current = false
+        }
+    }, [isPlaying])
+
+    // Cleanup on unmount
+    useEffect(() => {
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current)
         }
     }, [])
 
-    // Schedule DRAW signal when game starts
+    // Schedule DRAW signal when game starts (LEADER ONLY)
     useEffect(() => {
-        // Only LEADER sends signal
+        // Calculate isLeader dynamically every render to avoid stale closure
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
-        if (!isPlaying || gameState.localPhase !== 'WAIT' || !isLeader) return
+
+        if (!isPlaying || gameState.localPhase !== 'WAIT' || !isLeader || winnerId) return
+
+        console.log('[HIGHNOON] Leader scheduling DRAW signal...')
 
         const delay = 2000 + Math.random() * 3000
 
         timerRef.current = setTimeout(() => {
+            console.log('[HIGHNOON] Leader sending DRAW signal!')
             playDrawSignal()
-            // Dispatch Signal
             const now = Date.now()
             dispatchGameEvent('HIGHNOON_SIGNAL', { timestamp: now })
         }, delay)
@@ -97,39 +103,74 @@ const HighNoon = () => {
         return () => {
             if (timerRef.current) clearTimeout(timerRef.current)
         }
-    }, [isPlaying, gameState.localPhase, currentPlayerId, players, dispatchGameEvent])
+    }, [isPlaying, gameState.localPhase, currentPlayerId, players, winnerId, dispatchGameEvent])
 
-    // Determine winner when someone shoots
+    // Determine winner when someone shoots (LEADER ONLY)
     useEffect(() => {
-        if (gameState.localPhase !== 'DRAW' || gameState.shots.size === 0 || winnerId) return
-
-        // Only Leader calculates winner to avoid race conditions
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
+
+        if (gameState.localPhase !== 'DRAW' || winnerId || gameEndedRef.current) return
         if (!isLeader) return
 
+        // Check if we have any valid shots
         const validShots = Array.from(gameState.shots.entries())
             .filter(([playerId]) => !gameState.misfires.has(playerId))
             .sort(([, a], [, b]) => a - b)
 
         if (validShots.length > 0) {
+            gameEndedRef.current = true
             const [fastestPlayerId, shotTime] = validShots[0]
             const reactionTime = gameState.drawSignalTime
                 ? shotTime - gameState.drawSignalTime
                 : 0
 
-            // updateGameState(state => ({ ...state, localPhase: 'RESOLVING' })) // Local update? 
-            // Better to just end game?
-            // "RESOLVING" is visual.
-            // Let's keep it. BUT updateGameState is local.
-            // Host receives Shot, sets Resolving. EndGame shortly after.
-
-            updateGameState(state => ({ ...state, localPhase: 'RESOLVING' }))
+            console.log('[HIGHNOON] Winner determined:', fastestPlayerId, 'reaction:', reactionTime)
             playWinFanfare()
             endGame(fastestPlayerId, [
                 { playerId: fastestPlayerId, score: 100, rank: 1, metadata: { reactionTime } }
             ])
         }
-    }, [gameState, winnerId, endGame, updateGameState, players, currentPlayerId])
+    }, [gameState.shots, gameState.localPhase, gameState.misfires, gameState.drawSignalTime, winnerId, endGame, players, currentPlayerId])
+
+    // Check for game end when all players misfired
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+
+        if (!isPlaying || winnerId || gameEndedRef.current) return
+        if (!isLeader) return
+        if (players.length === 0) return
+
+        // Check if ALL players have misfired
+        const allMisfired = players.every(p => gameState.misfires.has(p.id))
+
+        if (allMisfired) {
+            console.log('[HIGHNOON] All players misfired! No winner.')
+            gameEndedRef.current = true
+            playFail()
+            endGame(null) // No winner
+        }
+    }, [gameState.misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
+
+    // Check for single remaining player after misfire (also ends game)
+    useEffect(() => {
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+
+        if (!isPlaying || winnerId || gameEndedRef.current) return
+        if (!isLeader) return
+        if (players.length < 2) return
+
+        // If only one player hasn't misfired, they win
+        const validPlayers = players.filter(p => !gameState.misfires.has(p.id))
+
+        if (validPlayers.length === 1 && gameState.misfires.size > 0) {
+            console.log('[HIGHNOON] Only one player remaining:', validPlayers[0].id)
+            gameEndedRef.current = true
+            playWinFanfare()
+            endGame(validPlayers[0].id, [
+                { playerId: validPlayers[0].id, score: 100, rank: 1, metadata: { byDefault: true } }
+            ])
+        }
+    }, [gameState.misfires, players, winnerId, isPlaying, endGame, currentPlayerId])
 
     const handleTap = useCallback(() => {
         if (!currentPlayerId || hasShotRef.current || winnerId) return
@@ -139,27 +180,33 @@ const HighNoon = () => {
         const timestamp = Date.now()
 
         if (gameState.localPhase === 'WAIT') {
+            // TOO EARLY - misfire!
+            console.log('[HIGHNOON] Misfire!')
             playFail()
             dispatchGameEvent('HIGHNOON_MISFIRE', { playerId: currentPlayerId })
             return
         }
 
         if (gameState.localPhase === 'DRAW') {
+            // Valid shot
+            console.log('[HIGHNOON] Shot fired!')
             playGunshot()
             dispatchGameEvent('HIGHNOON_SHOOT', { playerId: currentPlayerId, timestamp })
         }
-    }, [currentPlayerId, gameState, winnerId, dispatchGameEvent])
+    }, [currentPlayerId, gameState.localPhase, gameState.misfires, winnerId, dispatchGameEvent])
 
+    // Background color based on state
     const bgColor = gameState.localPhase === 'DRAW'
         ? 'bg-red-700'
         : gameState.misfires.has(currentPlayerId ?? '')
             ? 'bg-yellow-600'
-            : 'bg-atari-black'
+            : 'bg-gradient-to-b from-amber-900 to-amber-800'
 
     const getMessage = () => {
-        if (gameState.misfires.has(currentPlayerId ?? '')) return 'TOO EARLY!'
+        if (gameState.misfires.has(currentPlayerId ?? '')) return '💀 TOO EARLY!'
         if (gameState.localPhase === 'WAIT') return 'STEADY...'
         if (gameState.localPhase === 'DRAW') return '🔥 FIRE! 🔥'
+        if (gameState.localPhase === 'RESOLVING') return '🏆 WINNER!'
         return ''
     }
 
@@ -171,9 +218,10 @@ const HighNoon = () => {
             backgroundColor={bgColor}
         >
             <div
-                className="flex flex-col items-center justify-between w-full h-full p-4 cursor-pointer"
+                className="flex flex-col items-center justify-between w-full h-full p-4 cursor-pointer select-none"
                 onPointerDown={handleTap}
             >
+                {/* Title/Message */}
                 <div className="pt-8 text-center z-10">
                     <motion.h1
                         key={getMessage()}
@@ -186,17 +234,22 @@ const HighNoon = () => {
                     </motion.h1>
                 </div>
 
+                {/* Game Area */}
                 <div className="flex-1 w-full flex items-center justify-center relative">
+                    {/* Ground */}
                     <div className="absolute bottom-0 left-0 right-0 h-1/4 bg-gradient-to-t from-amber-800 to-amber-700" />
+                    {/* Sun */}
                     <div
                         className="absolute top-8 right-8 w-16 h-16 rounded-full bg-yellow-400 opacity-80"
                         style={{ boxShadow: '0 0 40px #FFD700' }}
                     />
 
+                    {/* Players */}
                     <div className="relative w-full max-w-4xl h-64 flex items-end justify-between px-8 md:px-16">
                         {players.slice(0, 2).map((player, idx) => {
                             const hasMisfired = gameState.misfires.has(player.id)
                             const hasShot = gameState.shots.has(player.id)
+                            const isMe = player.id === currentPlayerId
 
                             return (
                                 <motion.div
@@ -210,7 +263,7 @@ const HighNoon = () => {
                                 >
                                     <div className={clsx(
                                         "text-sm md:text-base font-pixel mb-2 px-2 py-1 rounded",
-                                        player.id === currentPlayerId
+                                        isMe
                                             ? "bg-atari-green text-black"
                                             : "bg-black/50 text-white"
                                     )}>
@@ -228,8 +281,9 @@ const HighNoon = () => {
                     </div>
                 </div>
 
+                {/* Instructions */}
                 <div className="pb-8 text-center z-10">
-                    <div className="text-lg md:text-xl font-mono text-white/70">
+                    <div className="text-lg md:text-xl font-mono text-white/90">
                         {gameState.misfires.has(currentPlayerId ?? '') ? (
                             <span className="text-yellow-300">DISQUALIFIED - TOO EARLY!</span>
                         ) : gameState.localPhase === 'WAIT' ? (
@@ -248,6 +302,7 @@ const HighNoon = () => {
                     </div>
                 </div>
 
+                {/* Flash effect on DRAW */}
                 <AnimatePresence>
                     {gameState.localPhase === 'DRAW' && !hasShotRef.current && (
                         <motion.div
