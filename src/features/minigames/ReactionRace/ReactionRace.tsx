@@ -11,15 +11,24 @@ import { playTap, playWinFanfare } from '../HighNoon/sounds'
 
 const TOTAL_ROUNDS = 5
 
+interface PlayerScore {
+    playerId: string
+    score: number
+}
+
 interface ReactionRaceState {
     round: number
     localPhase: 'WAITING' | 'REACT'
     targetAppearTime: number
-    scores: Map<string, number>
+    scores: PlayerScore[]  // Changed from Map to array
     roundWinner: string | null
     hasClicked: boolean
     myReactionTime: number | null
 }
+
+// Helper function to get score
+const getScore = (scores: PlayerScore[], playerId: string) =>
+    scores.find(s => s.playerId === playerId)?.score || 0
 
 const ReactionRace = () => {
     const engine = useMinigameEngine<ReactionRaceState>({
@@ -28,12 +37,15 @@ const ReactionRace = () => {
             round: 0,
             localPhase: 'WAITING',
             targetAppearTime: 0,
-            scores: new Map(),
+            scores: [],  // Empty array instead of Map
             roundWinner: null,
             hasClicked: false,
             myReactionTime: null
         },
         gameReducer: (state, event) => {
+            // Ensure scores is array (in case of sync issues)
+            const scores = Array.isArray(state.scores) ? state.scores : []
+
             if (event.type === 'TARGET_SPAWN') {
                 const { timestamp } = event as any
                 return {
@@ -45,11 +57,18 @@ const ReactionRace = () => {
             if (event.type === 'TAP_TARGET') {
                 if (state.roundWinner) return state // Already won
 
-
-
-
-                const newScores = new Map(state.scores)
-                newScores.set(event.senderId, (newScores.get(event.senderId) || 0) + 1)
+                // Update scores using array
+                const existingIdx = scores.findIndex(s => s.playerId === event.senderId)
+                let newScores: PlayerScore[]
+                if (existingIdx >= 0) {
+                    newScores = [...scores]
+                    newScores[existingIdx] = {
+                        playerId: event.senderId,
+                        score: scores[existingIdx].score + 1
+                    }
+                } else {
+                    newScores = [...scores, { playerId: event.senderId, score: 1 }]
+                }
 
                 return {
                     ...state,
@@ -86,6 +105,9 @@ const ReactionRace = () => {
         updateGameState
     } = engine
 
+    // Safe access to scores array
+    const scores = Array.isArray(gameState.scores) ? gameState.scores : []
+
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const gameEndedRef = useRef(false)
 
@@ -97,13 +119,13 @@ const ReactionRace = () => {
 
     // Initialize scores when players are available
     useEffect(() => {
-        if (players.length > 0 && gameState.scores.size === 0) {
+        if (players.length > 0 && scores.length === 0) {
             updateGameState(state => ({
                 ...state,
-                scores: new Map(players.map(p => [p.id, 0]))
+                scores: players.map(p => ({ playerId: p.id, score: 0 }))
             }))
         }
-    }, [players, gameState.scores.size, updateGameState])
+    }, [players, scores.length, updateGameState])
 
     // Start first round (Host Only)
     useEffect(() => {
@@ -152,13 +174,12 @@ const ReactionRace = () => {
 
         if (gameState.round > TOTAL_ROUNDS && !gameEndedRef.current) {
             gameEndedRef.current = true
-            const sortedScores = Array.from(gameState.scores.entries())
-                .sort(([, a], [, b]) => b - a)
-            const topWinner = sortedScores[0]?.[0] || null
+            const sortedScores = [...scores].sort((a, b) => b.score - a.score)
+            const topWinner = sortedScores[0]?.playerId || null
             playWinFanfare()
             endGame(topWinner)
         }
-    }, [gameState.round, gameState.scores, endGame, players, currentPlayerId])
+    }, [gameState.round, scores, endGame, players, currentPlayerId])
 
 
     const handleClick = useCallback(() => {
@@ -244,7 +265,7 @@ const ReactionRace = () => {
                         >
                             <div className="text-sm text-white/70">{player.username}</div>
                             <div className="text-2xl font-pixel text-cyan-400">
-                                {gameState.scores.get(player.id) || 0}
+                                {getScore(scores, player.id)}
                             </div>
                         </div>
                     ))}
@@ -255,3 +276,4 @@ const ReactionRace = () => {
 }
 
 export default ReactionRace
+
