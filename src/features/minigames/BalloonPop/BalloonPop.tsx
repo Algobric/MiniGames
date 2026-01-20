@@ -10,24 +10,70 @@ import clsx from 'clsx'
 import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
 const MAX_SIZE = 100
-const POP_THRESHOLD = 95 // Above this, risk of popping
+const POP_THRESHOLD = 95
+
+interface BalloonSize {
+    playerId: string
+    size: number
+}
 
 interface BalloonPopState {
-    balloonSizes: Map<string, number>
-    popped: Set<string>
-    locked: Set<string>
+    balloonSizes: BalloonSize[]
+    popped: string[]   // Changed from Set to array
+    locked: string[]   // Changed from Set to array
 }
+
+// Helper functions
+const getBalloonSize = (sizes: BalloonSize[], playerId: string) =>
+    sizes.find(s => s.playerId === playerId)?.size || 20
+
+const hasPopped = (popped: string[], playerId: string) =>
+    popped.includes(playerId)
+
+const isLocked = (locked: string[], playerId: string) =>
+    locked.includes(playerId)
 
 const BalloonPop = () => {
     const engine = useMinigameEngine<BalloonPopState>({
         config: {
             countdownDuration: 3,
-            gameDuration: 10 // 10 seconds
+            gameDuration: 10
         },
         initialGameState: {
-            balloonSizes: new Map(),
-            popped: new Set(),
-            locked: new Set()
+            balloonSizes: [],
+            popped: [],
+            locked: []
+        },
+        gameReducer: (state, event) => {
+            const balloonSizes = Array.isArray(state.balloonSizes) ? state.balloonSizes : []
+            const popped = Array.isArray(state.popped) ? state.popped : []
+            const locked = Array.isArray(state.locked) ? state.locked : []
+
+            if (event.type === 'BALLOON_PUMP') {
+                const { playerId, newSize, didPop } = event as any
+
+                if (didPop) {
+                    return { ...state, popped: [...popped, playerId] }
+                }
+
+                const existingIdx = balloonSizes.findIndex(s => s.playerId === playerId)
+                let newSizes: BalloonSize[]
+                if (existingIdx >= 0) {
+                    newSizes = [...balloonSizes]
+                    newSizes[existingIdx] = { playerId, size: newSize }
+                } else {
+                    newSizes = [...balloonSizes, { playerId, size: newSize }]
+                }
+                return { ...state, balloonSizes: newSizes }
+            }
+
+            if (event.type === 'BALLOON_LOCK') {
+                const { playerId } = event as any
+                if (locked.includes(playerId)) return state
+                return { ...state, locked: [...locked, playerId] }
+            }
+
+            return state
         }
     })
 
@@ -41,39 +87,44 @@ const BalloonPop = () => {
         currentPlayerId,
         players,
         updateGameState,
+        dispatchGameEvent,
         endGame
     } = engine
 
-    const gameEndedRef = useRef(false) // Local ref to prevent double triggers in effect
+    // Safe access to state arrays
+    const balloonSizes = Array.isArray(gameState.balloonSizes) ? gameState.balloonSizes : []
+    const popped = Array.isArray(gameState.popped) ? gameState.popped : []
+    const locked = Array.isArray(gameState.locked) ? gameState.locked : []
+
+    const gameEndedRef = useRef(false)
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const startSize = 20
 
     // Initialize state
     useEffect(() => {
-        if (players.length > 0 && gameState.balloonSizes.size === 0) {
+        if (players.length > 0 && balloonSizes.length === 0 && isPlaying) {
             updateGameState(state => ({
                 ...state,
-                balloonSizes: new Map(players.map(p => [p.id, startSize])),
-                popped: new Set(),
-                locked: new Set()
+                balloonSizes: players.map(p => ({ playerId: p.id, size: startSize })),
+                popped: [],
+                locked: []
             }))
         }
-    }, [players, gameState.balloonSizes.size, updateGameState])
+    }, [players, balloonSizes.length, isPlaying, updateGameState])
 
     // Handle Time Out
     useEffect(() => {
         if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
 
         if (timeRemaining !== null && timeRemaining <= 0) {
-            // Determine winner
             gameEndedRef.current = true
 
-            const activePlayers = players.filter(p => !gameState.popped.has(p.id))
+            const activePlayers = players.filter(p => !hasPopped(popped, p.id))
             let bestId: string | null = null
             let maxSize = -1
 
             for (const p of activePlayers) {
-                const size = gameState.balloonSizes.get(p.id) || 0
+                const size = getBalloonSize(balloonSizes, p.id)
                 if (size > maxSize) {
                     maxSize = size
                     bestId = p.id
@@ -83,46 +134,35 @@ const BalloonPop = () => {
             if (bestId === currentPlayerId) playWinFanfare()
             endGame(bestId)
         }
-    }, [timeRemaining, isPlaying, isLeader, winnerId, gameState.popped, gameState.balloonSizes, players, currentPlayerId, endGame])
+    }, [timeRemaining, isPlaying, isLeader, winnerId, popped, balloonSizes, players, currentPlayerId, endGame])
 
     const handlePump = useCallback(() => {
         if (!isPlaying || !currentPlayerId) return
-        if (gameState.popped.has(currentPlayerId) || gameState.locked.has(currentPlayerId)) return
+        if (hasPopped(popped, currentPlayerId) || isLocked(locked, currentPlayerId)) return
 
-        const currentSize = gameState.balloonSizes.get(currentPlayerId) || startSize
+        const currentSize = getBalloonSize(balloonSizes, currentPlayerId)
         const newSize = Math.min(MAX_SIZE, currentSize + 3)
         playTap()
 
-        // Risk calculation: bigger balloon = higher chance of popping
-        // Client-side authoritative pop check is fine here
+        // Risk calculation
+        let didPop = false
         if (newSize > POP_THRESHOLD) {
             const popChance = (newSize - POP_THRESHOLD) / (MAX_SIZE - POP_THRESHOLD) * 0.3
             if (Math.random() < popChance) {
                 playFail()
-                updateGameState(state => ({
-                    ...state,
-                    popped: new Set([...state.popped, currentPlayerId])
-                }))
-                return
+                didPop = true
             }
         }
 
-        updateGameState(state => ({
-            ...state,
-            balloonSizes: new Map([...state.balloonSizes, [currentPlayerId, newSize]])
-        }))
-
-    }, [isPlaying, currentPlayerId, gameState.popped, gameState.locked, gameState.balloonSizes, updateGameState])
+        dispatchGameEvent('BALLOON_PUMP', { playerId: currentPlayerId, newSize, didPop })
+    }, [isPlaying, currentPlayerId, popped, locked, balloonSizes, dispatchGameEvent])
 
     const handleLock = useCallback(() => {
         if (!isPlaying || !currentPlayerId) return
-        if (gameState.popped.has(currentPlayerId) || gameState.locked.has(currentPlayerId)) return
+        if (hasPopped(popped, currentPlayerId) || isLocked(locked, currentPlayerId)) return
 
-        updateGameState(state => ({
-            ...state,
-            locked: new Set([...state.locked, currentPlayerId])
-        }))
-    }, [isPlaying, currentPlayerId, gameState.popped, gameState.locked, updateGameState])
+        dispatchGameEvent('BALLOON_LOCK', { playerId: currentPlayerId })
+    }, [isPlaying, currentPlayerId, popped, locked, dispatchGameEvent])
 
     const COLORS = ['#FF6B6B', '#4ECDC4', '#FFE66D', '#95E1D3', '#DDA0DD', '#87CEEB']
 
@@ -143,9 +183,9 @@ const BalloonPop = () => {
 
                 <div className="flex-1 flex items-center justify-center gap-8 flex-wrap content-center">
                     {players.map((player, idx) => {
-                        const size = gameState.balloonSizes.get(player.id) || startSize
-                        const hasPopped = gameState.popped.has(player.id)
-                        const isLocked = gameState.locked.has(player.id)
+                        const size = getBalloonSize(balloonSizes, player.id)
+                        const playerPopped = hasPopped(popped, player.id)
+                        const playerLocked = isLocked(locked, player.id)
                         const isWinner = player.id === winnerId
 
                         return (
@@ -153,16 +193,16 @@ const BalloonPop = () => {
                                 <div className="text-sm text-white mb-2">{player.username}</div>
                                 <motion.div
                                     animate={{
-                                        scale: hasPopped ? 0 : 1,
-                                        opacity: hasPopped ? 0 : 1
+                                        scale: playerPopped ? 0 : 1,
+                                        opacity: playerPopped ? 0 : 1
                                     }}
                                     className="relative flex items-center justify-center"
-                                    style={{ width: 150, height: 180 }} // Fixed container to avoid jumping
+                                    style={{ width: 150, height: 180 }}
                                 >
-                                    {!hasPopped && (
+                                    {!playerPopped && (
                                         <>
                                             <div
-                                                className={clsx("rounded-full mx-auto transition-all duration-200", isLocked && "ring-4 ring-green-400")}
+                                                className={clsx("rounded-full mx-auto transition-all duration-200", playerLocked && "ring-4 ring-green-400")}
                                                 style={{
                                                     width: size * 1.5,
                                                     height: size * 1.8,
@@ -170,24 +210,23 @@ const BalloonPop = () => {
                                                     boxShadow: size > POP_THRESHOLD ? '0 0 20px #FF0000' : 'none'
                                                 }}
                                             />
-                                            {/* String of balloon */}
                                             <div className="absolute top-[85%] left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-8 border-transparent border-t-gray-600"
-                                                style={{ transform: `translate(-50%, ${size * 0.9}px)` }} // Move string with size? Actually keeping it simple for now
+                                                style={{ transform: `translate(-50%, ${size * 0.9}px)` }}
                                             />
                                         </>
                                     )}
-                                    {hasPopped && <div className="text-4xl">💥</div>}
+                                    {playerPopped && <div className="text-4xl">💥</div>}
                                     {isWinner && <div className="absolute -top-10 text-4xl">👑</div>}
                                 </motion.div>
                                 <div className="text-xs text-white/70 mt-2 font-pixel">
-                                    {hasPopped ? 'POPPED!' : isLocked ? 'LOCKED' : `${Math.round(size)}%`}
+                                    {playerPopped ? 'POPPED!' : playerLocked ? 'LOCKED' : `${Math.round(size)}%`}
                                 </div>
                             </div>
                         )
                     })}
                 </div>
 
-                {isPlaying && currentPlayerId && !gameState.popped.has(currentPlayerId) && !gameState.locked.has(currentPlayerId) && (
+                {isPlaying && currentPlayerId && !hasPopped(popped, currentPlayerId) && !isLocked(locked, currentPlayerId) && (
                     <div className="flex gap-4 pb-4">
                         <motion.button
                             whileTap={{ scale: 0.9 }}
@@ -210,5 +249,5 @@ const BalloonPop = () => {
     )
 }
 
-
 export default BalloonPop
+
