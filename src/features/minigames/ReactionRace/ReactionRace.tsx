@@ -110,6 +110,12 @@ const ReactionRace = () => {
 
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const gameEndedRef = useRef(false)
+    const roundRef = useRef(0)
+
+    // Keep roundRef in sync
+    useEffect(() => {
+        roundRef.current = gameState.round
+    }, [gameState.round])
 
     useEffect(() => {
         return () => {
@@ -135,9 +141,12 @@ const ReactionRace = () => {
         }
     }, [isPlaying, gameState.round, players, currentPlayerId])
 
-    // Host Round Logic
+    // Host Round Logic - uses ref to avoid stale closure
     const startHostRound = useCallback(() => {
-        const newRound = gameState.round + 1
+        const currentRound = roundRef.current
+        const newRound = currentRound + 1
+
+        console.log('[ReactionRace] Starting round', newRound, 'from current', currentRound)
 
         if (newRound > TOTAL_ROUNDS) {
             // Check Game End logic triggers in effect
@@ -152,7 +161,7 @@ const ReactionRace = () => {
             dispatchGameEvent('TARGET_SPAWN', { timestamp: Date.now() })
         }, delay)
 
-    }, [gameState.round, dispatchGameEvent])
+    }, [dispatchGameEvent])
 
     // Host Handle Round Win -> Next Round
     useEffect(() => {
@@ -160,6 +169,7 @@ const ReactionRace = () => {
         if (!isLeader) return
 
         if (gameState.roundWinner) {
+            console.log('[ReactionRace] Round winner detected, scheduling next round...')
             const timer = setTimeout(() => {
                 startHostRound()
             }, 2000)
