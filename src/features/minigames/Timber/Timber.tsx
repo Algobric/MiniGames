@@ -1,45 +1,58 @@
 /**
- * Timber - Chop fast, don't get hit!
- * REFACTORED TO USE THE NEW GAME ENGINE.
+ * Timber - Dodge falling branches!
+ * Branches fall from the sky, dodge LEFT or RIGHT to survive.
+ * First to survive 30 seconds or last one standing wins!
  */
 
-import { useCallback, useEffect } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useMinigameEngine, MinigameWrapper } from '../../../engine'
 import { motion } from 'framer-motion'
 import clsx from 'clsx'
-import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
+import { playTap, playWinFanfare } from '../HighNoon/sounds'
 
-type Side = 'LEFT' | 'RIGHT'
+type Side = 'LEFT' | 'RIGHT' | 'NONE'
+
+interface FallingBranch {
+    id: number
+    side: Side  // Where the branch is (dodge to opposite side)
+    y: number   // 0 = top, 100 = bottom
+}
 
 interface TimberPlayer {
     playerId: string
-    progress: number
-    side: Side
+    side: Side  // Current position (LEFT or RIGHT)
     alive: boolean
+    score: number
 }
 
 interface TimberState {
-    branches: Side[]
-    players: TimberPlayer[]  // Changed from Map to array
+    branches: FallingBranch[]
+    players: TimberPlayer[]
+    nextBranchId: number
 }
 
-// Helper functions
+// Helper
 const getPlayer = (players: TimberPlayer[], playerId: string) =>
     players.find(p => p.playerId === playerId)
+
+const GAME_DURATION = 20000 // 20 seconds
 
 const Timber = () => {
     const engine = useMinigameEngine<TimberState>({
         config: {
             countdownDuration: 3,
+            gameDuration: GAME_DURATION
         },
         initialGameState: {
             branches: [],
-            players: []
+            players: [],
+            nextBranchId: 0
         },
         gameReducer: (state, event) => {
             const players = Array.isArray(state.players) ? state.players : []
+            const branches = Array.isArray(state.branches) ? state.branches : []
 
-            if (event.type === 'CHOP') {
+            if (event.type === 'MOVE') {
                 const { side } = event as any
                 const playerIdx = players.findIndex(p => p.playerId === event.senderId)
                 if (playerIdx === -1) return state
@@ -47,18 +60,47 @@ const Timber = () => {
                 const p = players[playerIdx]
                 if (!p.alive) return state
 
-                const currentBranch = state.branches[p.progress]
                 let nextPlayers = [...players]
-
-                if (currentBranch === side) {
-                    // Hit the branch - die
-                    nextPlayers[playerIdx] = { ...p, side, alive: false }
-                } else {
-                    // Safe - progress
-                    nextPlayers[playerIdx] = { ...p, side, progress: p.progress + 1 }
-                }
+                nextPlayers[playerIdx] = { ...p, side }
                 return { ...state, players: nextPlayers }
             }
+
+            if (event.type === 'SPAWN_BRANCH') {
+                const { branchSide, branchId } = event as any
+                const newBranch: FallingBranch = {
+                    id: branchId,
+                    side: branchSide,
+                    y: 0
+                }
+                return {
+                    ...state,
+                    branches: [...branches, newBranch],
+                    nextBranchId: branchId + 1
+                }
+            }
+
+            if (event.type === 'UPDATE_BRANCHES') {
+                const { updatedBranches, killedPlayers } = event as any
+                let nextPlayers = [...players]
+
+                // Mark killed players
+                for (const pid of killedPlayers) {
+                    const idx = nextPlayers.findIndex(p => p.playerId === pid)
+                    if (idx >= 0) {
+                        nextPlayers[idx] = { ...nextPlayers[idx], alive: false }
+                    }
+                }
+
+                // Update surviving players' scores
+                for (let i = 0; i < nextPlayers.length; i++) {
+                    if (nextPlayers[i].alive) {
+                        nextPlayers[i] = { ...nextPlayers[i], score: nextPlayers[i].score + 1 }
+                    }
+                }
+
+                return { ...state, branches: updatedBranches, players: nextPlayers }
+            }
+
             return state
         }
     })
@@ -73,92 +115,140 @@ const Timber = () => {
         players,
         updateGameState,
         endGame,
+        timeRemaining,
         dispatchGameEvent
     } = engine
 
     // Safe access
     const timberPlayers = Array.isArray(gameState.players) ? gameState.players : []
+    const branches = Array.isArray(gameState.branches) ? gameState.branches : []
 
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
-    const GOAL = 50
+    const gameEndedRef = useRef(false)
 
-    // Init Level
+    // Init Players
     useEffect(() => {
-        if (players.length > 0 && gameState.branches.length === 0 && isPlaying) {
-            const newBranches: Side[] = []
-            for (let i = 0; i < GOAL + 10; i++) newBranches.push(Math.random() > 0.5 ? 'LEFT' : 'RIGHT')
-
-            const newPlayers: TimberPlayer[] = players.map(p => ({
+        if (players.length > 0 && timberPlayers.length === 0 && isPlaying) {
+            const newPlayers: TimberPlayer[] = players.map((p, i) => ({
                 playerId: p.id,
-                progress: 0,
-                side: 'LEFT' as Side,
-                alive: true
+                side: i === 0 ? 'LEFT' : 'RIGHT',
+                alive: true,
+                score: 0
             }))
 
             updateGameState(state => ({
                 ...state,
-                branches: newBranches,
-                players: newPlayers
+                players: newPlayers,
+                branches: [],
+                nextBranchId: 0
             }))
         }
-    }, [players, isPlaying, gameState.branches.length, updateGameState])
+    }, [players, isPlaying, timberPlayers.length, updateGameState])
+
+    // Leader spawns branches
+    useEffect(() => {
+        if (!isPlaying || !isLeader || winnerId) return
+        if (timberPlayers.length === 0) return
+
+        const spawnInterval = setInterval(() => {
+            const branchSide: Side = Math.random() > 0.5 ? 'LEFT' : 'RIGHT'
+            dispatchGameEvent('SPAWN_BRANCH', {
+                branchSide,
+                branchId: gameState.nextBranchId || 0
+            })
+        }, 800) // Spawn every 800ms
+
+        return () => clearInterval(spawnInterval)
+    }, [isPlaying, isLeader, winnerId, timberPlayers.length, dispatchGameEvent, gameState.nextBranchId])
+
+    // Leader updates branch positions and checks collisions
+    useEffect(() => {
+        if (!isPlaying || !isLeader || winnerId) return
+        if (timberPlayers.length === 0) return
+
+        const updateInterval = setInterval(() => {
+            const killedPlayers: string[] = []
+
+            const updatedBranches = branches
+                .map(b => ({ ...b, y: b.y + 8 })) // Move down
+                .filter(b => {
+                    // Check collision at y ~= 85 (hit zone)
+                    if (b.y >= 80 && b.y <= 95) {
+                        for (const p of timberPlayers) {
+                            if (p.alive && p.side === b.side) {
+                                // Player is on same side as branch - they die!
+                                killedPlayers.push(p.playerId)
+                            }
+                        }
+                    }
+                    return b.y < 100 // Remove branches that passed
+                })
+
+            if (killedPlayers.length > 0 || updatedBranches.length !== branches.length) {
+                dispatchGameEvent('UPDATE_BRANCHES', { updatedBranches, killedPlayers })
+            }
+        }, 50)
+
+        return () => clearInterval(updateInterval)
+    }, [isPlaying, isLeader, winnerId, branches, timberPlayers, dispatchGameEvent])
 
     // Game End Check
     useEffect(() => {
-        if (!isPlaying || !isLeader || winnerId) return
-        // Wait until players are initialized
+        if (!isPlaying || !isLeader || winnerId || gameEndedRef.current) return
         if (timberPlayers.length === 0) return
 
-        let allDead = true
-        let winner = null
+        const alivePlayers = timberPlayers.filter(p => p.alive)
 
-        for (const p of timberPlayers) {
-            if (p.alive) allDead = false
-            if (p.progress >= GOAL && p.alive) {
-                winner = p.playerId
-                break
-            }
-        }
-
-        if (winner) {
+        // Check if only one left
+        if (alivePlayers.length <= 1 && players.length > 1) {
+            gameEndedRef.current = true
+            const winner = alivePlayers[0]?.playerId || null
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
-        } else if (allDead) {
-            // All players dead - no winner
-            endGame(null)
+            return
         }
 
-    }, [timberPlayers, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+        // Check if time ran out
+        if (timeRemaining !== null && timeRemaining <= 0) {
+            gameEndedRef.current = true
+            // Highest score wins
+            const sorted = [...alivePlayers].sort((a, b) => b.score - a.score)
+            const winner = sorted[0]?.playerId || null
+            if (winner === currentPlayerId) playWinFanfare()
+            endGame(winner)
+        }
+    }, [timberPlayers, players.length, timeRemaining, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
 
-
-    const handleChop = useCallback((side: Side) => {
+    const handleMove = useCallback((side: Side) => {
         if (!isPlaying || !currentPlayerId) return
-
-        // Check locally for death to play sound immediately
         const myP = getPlayer(timberPlayers, currentPlayerId)
-        if (myP && myP.alive) {
-            const currentBranch = gameState.branches[myP.progress]
-            if (currentBranch === side) {
-                playFail()
-            } else {
-                playTap()
+        if (!myP?.alive) return
+
+        playTap()
+        dispatchGameEvent('MOVE', { side })
+    }, [isPlaying, currentPlayerId, timberPlayers, dispatchGameEvent])
+
+    // Keyboard controls
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.code === 'ArrowLeft' || e.code === 'KeyA') {
+                handleMove('LEFT')
+            } else if (e.code === 'ArrowRight' || e.code === 'KeyD') {
+                handleMove('RIGHT')
             }
         }
-
-        dispatchGameEvent('CHOP', { side })
-
-    }, [isPlaying, currentPlayerId, dispatchGameEvent, timberPlayers, gameState.branches])
+        window.addEventListener('keydown', handleKeyDown)
+        return () => window.removeEventListener('keydown', handleKeyDown)
+    }, [handleMove])
 
     const myState = getPlayer(timberPlayers, currentPlayerId || '')
-    const myProgress = myState?.progress || 0
-    // Visible branches: slice from myProgress
-    const visibleBranches = gameState.branches.slice(myProgress, myProgress + 6)
 
     return (
         <MinigameWrapper
             phase={phase}
             countdown={countdown}
             winnerId={winnerId}
+            timeRemaining={timeRemaining}
             backgroundColor="bg-gradient-to-b from-sky-400 to-green-600"
         >
             <div className="flex flex-col items-center justify-between w-full h-full p-4 select-none">
@@ -166,45 +256,75 @@ const Timber = () => {
                     <h1 className="text-3xl font-pixel text-white" style={{ textShadow: '0 2px 0 #000' }}>
                         🪓 TIMBER!
                     </h1>
+                    <p className="text-white/70 text-sm">Dodge left or right!</p>
                 </div>
 
-                {/* Game View */}
-                <div className="flex-1 flex flex-col items-center justify-end pb-8 relative w-full overflow-hidden">
-                    {/* Tree Trunk */}
-                    <div className="w-24 bg-amber-800 h-full relative flex flex-col-reverse justify-start">
-                        {visibleBranches.map((side, i) => (
-                            <motion.div
-                                key={myProgress + i}
-                                initial={{ y: -50, opacity: 0 }}
-                                animate={{ y: 0, opacity: 1 }}
-                                className="w-full h-24 border-b border-black/10 relative"
-                            >
-                                {/* Branch */}
-                                <div
-                                    className={clsx("absolute w-24 h-8 bg-green-800 top-8", side === 'LEFT' ? "-left-20 rounded-l-full" : "-right-20 rounded-r-full")}
-                                />
-                            </motion.div>
-                        ))}
-                    </div>
+                {/* Game Area */}
+                <div className="flex-1 relative w-full max-w-md overflow-hidden bg-amber-900/30 rounded-xl border-4 border-amber-800">
+                    {/* Tree trunk in center */}
+                    <div className="absolute left-1/2 top-0 bottom-0 w-16 -translate-x-1/2 bg-amber-800" />
 
-                    {/* Player */}
-                    {myState && (
+                    {/* Falling branches */}
+                    {branches.map(b => (
                         <motion.div
-                            animate={{ x: myState.side === 'LEFT' ? -80 : 80 }}
-                            className="absolute bottom-24 text-6xl"
-                        >
-                            {myState.alive ? '👷' : '🪦'}
-                        </motion.div>
-                    )}
+                            key={b.id}
+                            className={clsx(
+                                "absolute h-6 bg-green-700 rounded-full",
+                                b.side === 'LEFT' ? "left-4 right-1/2 mr-8" : "right-4 left-1/2 ml-8"
+                            )}
+                            style={{ top: `${b.y}%` }}
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                        />
+                    ))}
+
+                    {/* Hit zone indicator */}
+                    <div className="absolute left-0 right-0 bottom-[10%] h-1 bg-red-500/50" />
+
+                    {/* Players */}
+                    {timberPlayers.map((p) => {
+                        const pName = players.find(pl => pl.id === p.playerId)?.username || '?'
+                        const isMe = p.playerId === currentPlayerId
+                        return (
+                            <motion.div
+                                key={p.playerId}
+                                animate={{
+                                    x: p.side === 'LEFT' ? -60 : 60,
+                                    opacity: p.alive ? 1 : 0.3
+                                }}
+                                className={clsx(
+                                    "absolute bottom-[5%] left-1/2 -translate-x-1/2 text-center",
+                                    isMe ? "z-10" : "z-0"
+                                )}
+                            >
+                                <div className={clsx(
+                                    "text-4xl",
+                                    !p.alive && "grayscale"
+                                )}>
+                                    {p.alive ? '🧍' : '💀'}
+                                </div>
+                                <div className={clsx(
+                                    "text-xs mt-1 px-2 py-0.5 rounded",
+                                    isMe ? "bg-blue-500 text-white" : "bg-white/50 text-black"
+                                )}>
+                                    {pName}
+                                </div>
+                            </motion.div>
+                        )
+                    })}
                 </div>
 
-                {/* Progress */}
-                <div className="absolute top-20 right-4 bg-black/30 p-2 rounded text-white">
-                    {timberPlayers.map((p, i) => {
-                        const pName = players.find(pl => pl.id === p.playerId)?.username
+                {/* Scores */}
+                <div className="flex gap-4 mt-2">
+                    {timberPlayers.map(p => {
+                        const pName = players.find(pl => pl.id === p.playerId)?.username || '?'
                         return (
-                            <div key={i} className="text-xs">
-                                {pName}: {p.progress}/{GOAL} {p.alive ? '' : '💀'}
+                            <div key={p.playerId} className={clsx(
+                                "text-center px-3 py-1 rounded",
+                                p.playerId === currentPlayerId ? "bg-blue-500/50" : "bg-white/20"
+                            )}>
+                                <div className="text-sm text-white">{pName}</div>
+                                <div className="text-lg font-pixel text-white">{p.score}</div>
                             </div>
                         )
                     })}
@@ -212,22 +332,36 @@ const Timber = () => {
 
                 {/* Controls */}
                 {myState?.alive && isPlaying && (
-                    <div className="flex gap-16 pb-8 z-10">
+                    <div className="flex gap-8 pb-4 mt-4">
                         <motion.button
                             whileTap={{ scale: 0.9 }}
-                            onPointerDown={() => handleChop('LEFT')}
-                            className="w-32 h-32 bg-white/20 backdrop-blur-sm rounded-full text-4xl shadow-lg border-b-4 border-white/50"
+                            onClick={() => handleMove('LEFT')}
+                            className={clsx(
+                                "w-24 h-24 rounded-full text-4xl shadow-lg border-b-4",
+                                myState.side === 'LEFT'
+                                    ? "bg-blue-500 border-blue-700"
+                                    : "bg-white/20 border-white/50"
+                            )}
                         >
                             ⬅️
                         </motion.button>
                         <motion.button
                             whileTap={{ scale: 0.9 }}
-                            onPointerDown={() => handleChop('RIGHT')}
-                            className="w-32 h-32 bg-white/20 backdrop-blur-sm rounded-full text-4xl shadow-lg border-b-4 border-white/50"
+                            onClick={() => handleMove('RIGHT')}
+                            className={clsx(
+                                "w-24 h-24 rounded-full text-4xl shadow-lg border-b-4",
+                                myState.side === 'RIGHT'
+                                    ? "bg-blue-500 border-blue-700"
+                                    : "bg-white/20 border-white/50"
+                            )}
                         >
                             ➡️
                         </motion.button>
                     </div>
+                )}
+
+                {myState && !myState.alive && (
+                    <div className="text-red-400 font-pixel text-xl pb-4">💀 YOU DIED!</div>
                 )}
             </div>
         </MinigameWrapper>
