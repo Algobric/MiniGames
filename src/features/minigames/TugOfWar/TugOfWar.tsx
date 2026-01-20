@@ -10,18 +10,56 @@ import clsx from 'clsx'
 import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
 const WIN_THRESHOLD = 100
+const PULL_FORCE = 10  // Increased from 3 to 10 for faster rounds
+
+interface PullCount {
+    playerId: string
+    count: number
+}
 
 interface TugOfWarState {
     ropePosition: number
-    pullCounts: Map<string, number>
+    pullCounts: PullCount[]  // Changed from Map to array
 }
+
+// Helper function
+const getPullCount = (pullCounts: PullCount[], playerId: string) =>
+    pullCounts.find(p => p.playerId === playerId)?.count || 0
 
 const TugOfWar = () => {
     const engine = useMinigameEngine<TugOfWarState>({
         config: { countdownDuration: 3 },
         initialGameState: {
             ropePosition: 0,
-            pullCounts: new Map()
+            pullCounts: []
+        },
+        gameReducer: (state, event) => {
+            // Ensure pullCounts is array
+            const pullCounts = Array.isArray(state.pullCounts) ? state.pullCounts : []
+
+            if (event.type === 'TUG_PULL') {
+                const { direction, playerId } = event as any
+                const force = direction * PULL_FORCE
+                const newPosition = Math.max(-WIN_THRESHOLD, Math.min(WIN_THRESHOLD, state.ropePosition + force))
+
+                // Update pull counts
+                const existingIdx = pullCounts.findIndex(p => p.playerId === playerId)
+                let newCounts: PullCount[]
+                if (existingIdx >= 0) {
+                    newCounts = [...pullCounts]
+                    newCounts[existingIdx] = { playerId, count: pullCounts[existingIdx].count + 1 }
+                } else {
+                    newCounts = [...pullCounts, { playerId, count: 1 }]
+                }
+
+                return { ...state, ropePosition: newPosition, pullCounts: newCounts }
+            }
+
+            if (event.type === 'TUG_DECAY') {
+                return { ...state, ropePosition: state.ropePosition * 0.98 }
+            }
+
+            return state
         }
     })
 
@@ -34,8 +72,12 @@ const TugOfWar = () => {
         currentPlayerId,
         players,
         endGame,
+        dispatchGameEvent,
         updateGameState
     } = engine
+
+    // Safe access to pullCounts
+    const pullCounts = Array.isArray(gameState.pullCounts) ? gameState.pullCounts : []
 
     const gameEndedRef = useRef(false)
     const myIndex = players.findIndex(p => p.id === currentPlayerId)
@@ -43,29 +85,31 @@ const TugOfWar = () => {
 
     // Initialize pull counts
     useEffect(() => {
-        if (players.length > 0 && gameState.pullCounts.size === 0) {
+        if (players.length > 0 && pullCounts.length === 0 && isPlaying) {
             updateGameState(state => ({
                 ...state,
-                pullCounts: new Map(players.map(p => [p.id, 0]))
+                pullCounts: players.map(p => ({ playerId: p.id, count: 0 }))
             }))
         }
-    }, [players, gameState.pullCounts.size, updateGameState])
+    }, [players, pullCounts.length, isPlaying, updateGameState])
 
-    // Natural drift back to center
+    // Natural drift back to center (host only for consistency)
     useEffect(() => {
         if (!isPlaying || winnerId) return
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
+
         const interval = setInterval(() => {
-            updateGameState(state => ({
-                ...state,
-                ropePosition: state.ropePosition * 0.99
-            }))
-        }, 50)
+            dispatchGameEvent('TUG_DECAY', {})
+        }, 100)
         return () => clearInterval(interval)
-    }, [isPlaying, winnerId, updateGameState])
+    }, [isPlaying, winnerId, players, currentPlayerId, dispatchGameEvent])
 
     // Check win condition
     useEffect(() => {
         if (!isPlaying || winnerId || gameEndedRef.current) return
+        const isLeader = players.length > 0 && players[0].id === currentPlayerId
+        if (!isLeader) return
 
         if (Math.abs(gameState.ropePosition) >= WIN_THRESHOLD) {
             gameEndedRef.current = true
@@ -83,12 +127,8 @@ const TugOfWar = () => {
         if (!isPlaying || !currentPlayerId || winnerId) return
 
         playTap()
-        updateGameState(state => ({
-            ...state,
-            ropePosition: Math.max(-WIN_THRESHOLD, Math.min(WIN_THRESHOLD, state.ropePosition + myDirection * 3)),
-            pullCounts: new Map([...state.pullCounts, [currentPlayerId, (state.pullCounts.get(currentPlayerId) || 0) + 1]])
-        }))
-    }, [isPlaying, currentPlayerId, winnerId, myDirection, updateGameState])
+        dispatchGameEvent('TUG_PULL', { direction: myDirection, playerId: currentPlayerId })
+    }, [isPlaying, currentPlayerId, winnerId, myDirection, dispatchGameEvent])
 
     return (
         <MinigameWrapper
@@ -110,12 +150,12 @@ const TugOfWar = () => {
                             <div className={clsx("text-center", myIndex === 0 && "text-yellow-400")}>
                                 <div className="text-2xl">💪</div>
                                 <div className="text-sm text-white">{players[0]?.username}</div>
-                                <div className="text-xs text-white/70">{gameState.pullCounts.get(players[0]?.id) || 0} pulls</div>
+                                <div className="text-xs text-white/70">{getPullCount(pullCounts, players[0]?.id)} pulls</div>
                             </div>
                             <div className={clsx("text-center", myIndex === 1 && "text-yellow-400")}>
                                 <div className="text-2xl">💪</div>
                                 <div className="text-sm text-white">{players[1]?.username}</div>
-                                <div className="text-xs text-white/70">{gameState.pullCounts.get(players[1]?.id) || 0} pulls</div>
+                                <div className="text-xs text-white/70">{getPullCount(pullCounts, players[1]?.id)} pulls</div>
                             </div>
                         </div>
 
@@ -155,3 +195,4 @@ const TugOfWar = () => {
 }
 
 export default TugOfWar
+
