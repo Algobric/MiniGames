@@ -106,6 +106,8 @@ const Timber = () => {
     // Game End Check
     useEffect(() => {
         if (!isPlaying || !isLeader || winnerId) return
+        // Wait until players are initialized
+        if (timberPlayers.length === 0) return
 
         let allDead = true
         let winner = null
@@ -121,11 +123,12 @@ const Timber = () => {
         if (winner) {
             if (winner === currentPlayerId) playWinFanfare()
             endGame(winner)
-        } else if (allDead && players.length > 0) {
+        } else if (allDead) {
+            // All players dead - no winner
             endGame(null)
         }
 
-    }, [timberPlayers, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+    }, [timberPlayers, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
 
 
     const handleChop = useCallback((side: Side) => {
