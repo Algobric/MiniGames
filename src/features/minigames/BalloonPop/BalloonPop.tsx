@@ -193,34 +193,24 @@ const BalloonPop = () => {
         })
     }, [scores, dispatchGameEvent, endGame])
 
-    // Round timer - check if time is up
-    useEffect(() => {
-        if (!isPlaying || !isLeader || gameState.roundPhase !== 'PUMPING' || winnerId) return
-
-        const checkRoundEnd = () => {
-            const elapsed = Date.now() - gameState.roundStartTime
-            if (elapsed >= ROUND_TIME && !roundEndedRef.current) {
-                roundEndedRef.current = true
-                endCurrentRound()
-            }
-        }
-
-        const interval = setInterval(checkRoundEnd, 100)
-        return () => clearInterval(interval)
-    }, [isPlaying, isLeader, gameState.roundPhase, gameState.roundStartTime, winnerId])
-
-    // Calculate round time remaining
-    const roundTimeRemaining = gameState.roundPhase === 'PUMPING'
-        ? Math.max(0, ROUND_TIME - (Date.now() - gameState.roundStartTime))
-        : 0
-
+    // endCurrentRound - defined before timer effect to avoid declaration order issue
     const endCurrentRound = useCallback(() => {
+        if (roundEndedRef.current) return
+        roundEndedRef.current = true
+
         // Find winner: highest size that didn't pop
         const activePlayers = players.filter(p => !hasPopped(popped, p.id))
 
         if (activePlayers.length === 0) {
             // Everyone popped - no winner
+            console.log('[BalloonPop] Everyone popped! No winner.')
             dispatchGameEvent('ROUND_END', { winnerId: null })
+        } else if (activePlayers.length === 1) {
+            // Only one left - they win!
+            const winnerId = activePlayers[0].id
+            console.log('[BalloonPop] Only one player left, they win:', winnerId)
+            if (winnerId === currentPlayerId) playWinFanfare()
+            dispatchGameEvent('ROUND_END', { winnerId })
         } else {
             // Find highest
             let maxSize = -1
@@ -241,18 +231,61 @@ const BalloonPop = () => {
                 ? candidates[0]
                 : candidates[Math.floor(Math.random() * candidates.length)]
 
+            console.log('[BalloonPop] Time up! Winner:', winnerId, 'with size', maxSize)
             if (winnerId === currentPlayerId) playWinFanfare()
             dispatchGameEvent('ROUND_END', { winnerId })
         }
     }, [players, popped, balloonSizes, currentPlayerId, dispatchGameEvent])
 
+    // When someone pops, check if round should end (only one player left wins)
+    useEffect(() => {
+        if (!isLeader || gameState.roundPhase !== 'PUMPING' || popped.length === 0) return
+        if (roundEndedRef.current) return
+
+        // If at least one player popped
+        const activePlayers = players.filter(p => !hasPopped(popped, p.id))
+
+        if (activePlayers.length === 1) {
+            // Only one player left - round ends, they win!
+            console.log('[BalloonPop] Someone popped! Ending round immediately.')
+            endCurrentRound()
+        } else if (activePlayers.length === 0) {
+            // Everyone popped
+            console.log('[BalloonPop] Everyone popped!')
+            endCurrentRound()
+        }
+    }, [popped, isLeader, gameState.roundPhase, players, endCurrentRound])
+
+    // Round timer - check if time is up
+    useEffect(() => {
+        if (!isPlaying || !isLeader || gameState.roundPhase !== 'PUMPING' || winnerId) return
+        if (gameState.roundStartTime === 0) return
+
+        const checkRoundEnd = () => {
+            const elapsed = Date.now() - gameState.roundStartTime
+            if (elapsed >= ROUND_TIME && !roundEndedRef.current) {
+                console.log('[BalloonPop] Time up! Ending round...')
+                endCurrentRound()
+            }
+        }
+
+        const interval = setInterval(checkRoundEnd, 100)
+        return () => clearInterval(interval)
+    }, [isPlaying, isLeader, gameState.roundPhase, gameState.roundStartTime, winnerId, endCurrentRound])
+
+    // Calculate round time remaining
+    const roundTimeRemaining = gameState.roundPhase === 'PUMPING'
+        ? Math.max(0, ROUND_TIME - (Date.now() - gameState.roundStartTime))
+        : 0
+
     // Auto-advance to next round after result
     useEffect(() => {
         if (!isLeader || gameState.roundPhase !== 'RESULT') return
 
+        console.log('[BalloonPop] Round result shown, advancing in 1.5s...')
         const timer = setTimeout(() => {
             startNewRound()
-        }, 2500)
+        }, 1500)
 
         return () => clearTimeout(timer)
     }, [gameState.roundPhase, isLeader, startNewRound])
