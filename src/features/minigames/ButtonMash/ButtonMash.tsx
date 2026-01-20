@@ -12,24 +12,44 @@ import { playTap } from '../HighNoon/sounds'
 
 const GAME_DURATION = 5000
 
-interface ButtonMashState {
-    tapCounts: Map<string, number>
+interface TapCount {
+    playerId: string
+    count: number
 }
+
+interface ButtonMashState {
+    tapCounts: TapCount[]  // Changed from Map to array
+}
+
+// Helper function
+const getTapCount = (tapCounts: TapCount[], playerId: string) =>
+    tapCounts.find(t => t.playerId === playerId)?.count || 0
 
 const ButtonMash = () => {
     const engine = useMinigameEngine<ButtonMashState>({
         config: { countdownDuration: 3 },
         initialGameState: {
-            tapCounts: new Map()
+            tapCounts: []
         },
         gameDuration: GAME_DURATION,
         gameReducer: (state, event) => {
+            // Ensure tapCounts is array
+            const tapCounts = Array.isArray(state.tapCounts) ? state.tapCounts : []
+
             if (event.type === 'MASH_TAP') {
-                // Optimization: Handle multiple taps if packet aggregation used later
-                const count = (event as any).count || 1
-                const current = state.tapCounts.get(event.senderId) || 0
-                const newCounts = new Map(state.tapCounts)
-                newCounts.set(event.senderId, current + count)
+                const tapCount = (event as any).count || 1
+                const existingIdx = tapCounts.findIndex(t => t.playerId === event.senderId)
+
+                let newCounts: TapCount[]
+                if (existingIdx >= 0) {
+                    newCounts = [...tapCounts]
+                    newCounts[existingIdx] = {
+                        playerId: event.senderId,
+                        count: tapCounts[existingIdx].count + tapCount
+                    }
+                } else {
+                    newCounts = [...tapCounts, { playerId: event.senderId, count: tapCount }]
+                }
                 return { ...state, tapCounts: newCounts }
             }
             return state
@@ -50,18 +70,21 @@ const ButtonMash = () => {
         updateGameState
     } = engine
 
+    // Safe access to tapCounts
+    const tapCounts = Array.isArray(gameState.tapCounts) ? gameState.tapCounts : []
+
     const screenShakeRef = useRef(false)
     const myTapsRef = useRef(0)
     const gameEndedRef = useRef(false)
 
     // Initialize tap counts when players are available
     useEffect(() => {
-        if (players.length > 0 && gameState.tapCounts.size === 0) {
+        if (players.length > 0 && tapCounts.length === 0) {
             updateGameState(() => ({
-                tapCounts: new Map(players.map(p => [p.id, 0]))
+                tapCounts: players.map(p => ({ playerId: p.id, count: 0 }))
             }))
         }
-    }, [players, gameState.tapCounts.size, updateGameState])
+    }, [players, tapCounts.length, updateGameState])
 
     // Check if game should end
     useEffect(() => {
@@ -72,19 +95,18 @@ const ButtonMash = () => {
         if (isPlaying && timeRemaining !== null && timeRemaining <= 0 && !gameEndedRef.current) {
             gameEndedRef.current = true
 
-            const sortedCounts = Array.from(gameState.tapCounts.entries())
-                .sort(([, a], [, b]) => b - a)
+            const sortedCounts = [...tapCounts].sort((a, b) => b.count - a.count)
 
             const topPlayer = sortedCounts[0]
             if (topPlayer) {
-                endGame(topPlayer[0], sortedCounts.map(([playerId, score], idx) => ({
-                    playerId,
-                    score,
+                endGame(topPlayer.playerId, sortedCounts.map((t, idx) => ({
+                    playerId: t.playerId,
+                    score: t.count,
                     rank: idx + 1
                 })))
             }
         }
-    }, [isPlaying, timeRemaining, gameState.tapCounts, endGame, players, currentPlayerId])
+    }, [isPlaying, timeRemaining, tapCounts, endGame, players, currentPlayerId])
 
     const handleTap = useCallback(() => {
         if (!isPlaying || !currentPlayerId || winnerId) return
@@ -98,10 +120,10 @@ const ButtonMash = () => {
     }, [isPlaying, currentPlayerId, winnerId, dispatchGameEvent])
 
     const sortedPlayers = [...players].sort((a, b) =>
-        (gameState.tapCounts.get(b.id) || 0) - (gameState.tapCounts.get(a.id) || 0)
+        getTapCount(tapCounts, b.id) - getTapCount(tapCounts, a.id)
     )
 
-    const maxTaps = Math.max(...Array.from(gameState.tapCounts.values()), 1)
+    const maxTaps = Math.max(...tapCounts.map(t => t.count), 1)
 
     return (
         <MinigameWrapper
@@ -133,7 +155,7 @@ const ButtonMash = () => {
 
                 <div className="flex-1 w-full max-w-2xl flex flex-col justify-center gap-4 py-4">
                     {sortedPlayers.map((player, idx) => {
-                        const count = gameState.tapCounts.get(player.id) || 0
+                        const count = getTapCount(tapCounts, player.id)
                         const isMe = player.id === currentPlayerId
 
                         return (
@@ -176,3 +198,4 @@ const ButtonMash = () => {
 }
 
 export default ButtonMash
+
