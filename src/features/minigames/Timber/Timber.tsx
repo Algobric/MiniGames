@@ -11,14 +11,21 @@ import { playTap, playWinFanfare, playFail } from '../HighNoon/sounds'
 
 type Side = 'LEFT' | 'RIGHT'
 
-interface TimberState {
-    branches: Side[] // 0 is bottom, N is top
-    players: Map<string, {
-        progress: number
-        side: Side
-        alive: boolean
-    }>
+interface TimberPlayer {
+    playerId: string
+    progress: number
+    side: Side
+    alive: boolean
 }
+
+interface TimberState {
+    branches: Side[]
+    players: TimberPlayer[]  // Changed from Map to array
+}
+
+// Helper functions
+const getPlayer = (players: TimberPlayer[], playerId: string) =>
+    players.find(p => p.playerId === playerId)
 
 const Timber = () => {
     const engine = useMinigameEngine<TimberState>({
@@ -27,34 +34,28 @@ const Timber = () => {
         },
         initialGameState: {
             branches: [],
-            players: new Map()
+            players: []
         },
         gameReducer: (state, event) => {
+            const players = Array.isArray(state.players) ? state.players : []
+
             if (event.type === 'CHOP') {
                 const { side } = event as any
-                const p = state.players.get(event.senderId)
-                if (!p || !p.alive) return state
+                const playerIdx = players.findIndex(p => p.playerId === event.senderId)
+                if (playerIdx === -1) return state
+
+                const p = players[playerIdx]
+                if (!p.alive) return state
 
                 const currentBranch = state.branches[p.progress]
-                const nextPlayers = new Map(state.players)
-
-                // Check death (Collision with branch falling on your head)
-                // Or collision with branch AT your new location?
-                // Classic logic: If I chop LEFT, and there is a branch LEFT at bottom (now), I die?
-                // Wait, logic in previous code:
-                // if (currentBranch === side) { Die }
-                // currentBranch is branches[p.progress].
-                // If I am at 0. Branch[0] is above me.
-                // If I move to Side Left. And Branch[0] IS Left. I hit it. I die.
-                // This logic seems correct for "Don't move into a branch".
+                let nextPlayers = [...players]
 
                 if (currentBranch === side) {
-                    nextPlayers.set(event.senderId, { ...p, side, alive: false })
-                    // Play local fail sound if it's me? 
-                    // Reducer is pure. Sound handled elsewhere? 
-                    // Or just state update.
+                    // Hit the branch - die
+                    nextPlayers[playerIdx] = { ...p, side, alive: false }
                 } else {
-                    nextPlayers.set(event.senderId, { ...p, side, progress: p.progress + 1 })
+                    // Safe - progress
+                    nextPlayers[playerIdx] = { ...p, side, progress: p.progress + 1 }
                 }
                 return { ...state, players: nextPlayers }
             }
@@ -75,6 +76,9 @@ const Timber = () => {
         dispatchGameEvent
     } = engine
 
+    // Safe access
+    const timberPlayers = Array.isArray(gameState.players) ? gameState.players : []
+
     const isLeader = players.length > 0 && players[0].id === currentPlayerId
     const GOAL = 50
 
@@ -84,8 +88,12 @@ const Timber = () => {
             const newBranches: Side[] = []
             for (let i = 0; i < GOAL + 10; i++) newBranches.push(Math.random() > 0.5 ? 'LEFT' : 'RIGHT')
 
-            const newPlayers = new Map()
-            players.forEach(p => newPlayers.set(p.id, { progress: 0, side: 'LEFT', alive: true }))
+            const newPlayers: TimberPlayer[] = players.map(p => ({
+                playerId: p.id,
+                progress: 0,
+                side: 'LEFT' as Side,
+                alive: true
+            }))
 
             updateGameState(state => ({
                 ...state,
@@ -102,10 +110,10 @@ const Timber = () => {
         let allDead = true
         let winner = null
 
-        for (const [pid, p] of gameState.players) {
+        for (const p of timberPlayers) {
             if (p.alive) allDead = false
             if (p.progress >= GOAL && p.alive) {
-                winner = pid
+                winner = p.playerId
                 break
             }
         }
@@ -117,14 +125,14 @@ const Timber = () => {
             endGame(null)
         }
 
-    }, [gameState.players, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
+    }, [timberPlayers, players.length, isPlaying, isLeader, winnerId, currentPlayerId, endGame])
 
 
     const handleChop = useCallback((side: Side) => {
         if (!isPlaying || !currentPlayerId) return
 
         // Check locally for death to play sound immediately
-        const myP = gameState.players.get(currentPlayerId)
+        const myP = getPlayer(timberPlayers, currentPlayerId)
         if (myP && myP.alive) {
             const currentBranch = gameState.branches[myP.progress]
             if (currentBranch === side) {
@@ -136,9 +144,9 @@ const Timber = () => {
 
         dispatchGameEvent('CHOP', { side })
 
-    }, [isPlaying, currentPlayerId, dispatchGameEvent, gameState.players, gameState.branches])
+    }, [isPlaying, currentPlayerId, dispatchGameEvent, timberPlayers, gameState.branches])
 
-    const myState = gameState.players.get(currentPlayerId || '')
+    const myState = getPlayer(timberPlayers, currentPlayerId || '')
     const myProgress = myState?.progress || 0
     // Visible branches: slice from myProgress
     const visibleBranches = gameState.branches.slice(myProgress, myProgress + 6)
@@ -189,11 +197,8 @@ const Timber = () => {
 
                 {/* Progress */}
                 <div className="absolute top-20 right-4 bg-black/30 p-2 rounded text-white">
-                    {/* Leaderboard small */}
-                    {Array.from(gameState.players.values()).map((p, i) => {
-                        // Find owner ID
-                        const pid = [...gameState.players.entries()].find(([, v]) => v === p)?.[0]
-                        const pName = players.find(pl => pl.id === pid)?.username
+                    {timberPlayers.map((p, i) => {
+                        const pName = players.find(pl => pl.id === p.playerId)?.username
                         return (
                             <div key={i} className="text-xs">
                                 {pName}: {p.progress}/{GOAL} {p.alive ? '' : '💀'}
