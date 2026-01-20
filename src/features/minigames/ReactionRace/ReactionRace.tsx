@@ -109,7 +109,6 @@ const ReactionRace = () => {
     const scores = Array.isArray(gameState.scores) ? gameState.scores : []
 
     const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-    const gameEndedRef = useRef(false)
     const roundRef = useRef(0)
 
     // Keep roundRef in sync
@@ -141,6 +140,8 @@ const ReactionRace = () => {
         }
     }, [isPlaying, gameState.round, players, currentPlayerId])
 
+    const gameEndScheduledRef = useRef(false)
+
     // Host Round Logic - uses ref to avoid stale closure
     const startHostRound = useCallback(() => {
         const currentRound = roundRef.current
@@ -149,8 +150,19 @@ const ReactionRace = () => {
         console.log('[ReactionRace] Starting round', newRound, 'from current', currentRound)
 
         if (newRound > TOTAL_ROUNDS) {
-            // Check Game End logic triggers in effect
-            dispatchGameEvent('SYSTEM_GAME_END_CHECK', {})
+            // All rounds complete - end game directly
+            if (gameEndScheduledRef.current) {
+                console.log('[ReactionRace] Game already ending, skipping')
+                return
+            }
+            gameEndScheduledRef.current = true
+
+            console.log('[ReactionRace] All rounds complete, ending game')
+            const currentScores = Array.isArray(scoresRef.current) ? scoresRef.current : []
+            const sortedScores = [...currentScores].sort((a, b) => b.score - a.score)
+            const topWinner = sortedScores[0]?.playerId || null
+            playWinFanfare()
+            endGame(topWinner)
             return
         }
 
@@ -161,14 +173,20 @@ const ReactionRace = () => {
             dispatchGameEvent('TARGET_SPAWN', { timestamp: Date.now() })
         }, delay)
 
-    }, [dispatchGameEvent])
+    }, [dispatchGameEvent, endGame])
+
+    // Keep scoresRef in sync
+    const scoresRef = useRef(scores)
+    useEffect(() => {
+        scoresRef.current = scores
+    }, [scores])
 
     // Host Handle Round Win -> Next Round
     useEffect(() => {
         const isLeader = players.length > 0 && players[0].id === currentPlayerId
         if (!isLeader) return
 
-        if (gameState.roundWinner) {
+        if (gameState.roundWinner && !gameEndScheduledRef.current) {
             console.log('[ReactionRace] Round winner detected, scheduling next round...')
             const timer = setTimeout(() => {
                 startHostRound()
@@ -176,20 +194,6 @@ const ReactionRace = () => {
             return () => clearTimeout(timer)
         }
     }, [gameState.roundWinner, startHostRound, players, currentPlayerId])
-
-    // Game End Check
-    useEffect(() => {
-        const isLeader = players.length > 0 && players[0].id === currentPlayerId
-        if (!isLeader) return
-
-        if (gameState.round > TOTAL_ROUNDS && !gameEndedRef.current) {
-            gameEndedRef.current = true
-            const sortedScores = [...scores].sort((a, b) => b.score - a.score)
-            const topWinner = sortedScores[0]?.playerId || null
-            playWinFanfare()
-            endGame(topWinner)
-        }
-    }, [gameState.round, scores, endGame, players, currentPlayerId])
 
 
     const handleClick = useCallback(() => {
