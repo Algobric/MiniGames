@@ -184,9 +184,8 @@ const Timber = () => {
                     return b.y < 100 // Remove branches that passed
                 })
 
-            if (killedPlayers.length > 0 || updatedBranches.length !== branches.length) {
-                dispatchGameEvent('UPDATE_BRANCHES', { updatedBranches, killedPlayers })
-            }
+            // Always dispatch to keep branches moving smoothly
+            dispatchGameEvent('UPDATE_BRANCHES', { updatedBranches, killedPlayers })
         }, 50)
 
         return () => clearInterval(updateInterval)
