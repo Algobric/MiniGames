@@ -146,61 +146,67 @@ const Timber = () => {
         }
     }, [players, isPlaying, timberPlayers.length, updateGameState])
 
-    // Track branchId with ref to avoid stale closure
+    // Use refs for stable access in intervals
     const branchIdRef = useRef(0)
+    const branchesRef = useRef<FallingBranch[]>([])
+    const playersRef = useRef<TimberPlayer[]>([])
 
-    // Leader spawns branches
+    // Keep refs in sync with state
+    useEffect(() => {
+        branchesRef.current = branches
+        playersRef.current = timberPlayers
+    }, [branches, timberPlayers])
+
+    // Combined game loop - only runs when isPlaying and isLeader and not ended
     useEffect(() => {
         if (!isPlaying || !isLeader || winnerId) return
         if (timberPlayers.length === 0) return
 
-        console.log('[Timber] Starting branch spawn interval')
+        console.log('[Timber] Starting game loop')
 
-        const spawnInterval = setInterval(() => {
-            const branchSide: Side = Math.random() > 0.5 ? 'LEFT' : 'RIGHT'
-            const id = branchIdRef.current++
-            console.log('[Timber] Spawning branch', id, 'side:', branchSide)
-            dispatchGameEvent('SPAWN_BRANCH', {
-                branchSide,
-                branchId: id
-            })
-        }, 800) // Spawn every 800ms
+        let lastSpawnTime = Date.now()
+        const SPAWN_INTERVAL = 800
 
-        return () => {
-            console.log('[Timber] Clearing spawn interval')
-            clearInterval(spawnInterval)
-        }
-    }, [isPlaying, isLeader, winnerId, timberPlayers.length, dispatchGameEvent])
+        const gameLoop = setInterval(() => {
+            const now = Date.now()
+            const currentBranches = branchesRef.current
+            const currentPlayers = playersRef.current
 
-    // Leader updates branch positions and checks collisions
-    useEffect(() => {
-        if (!isPlaying || !isLeader || winnerId) return
-        if (timberPlayers.length === 0) return
+            // Spawn new branch every 800ms
+            if (now - lastSpawnTime >= SPAWN_INTERVAL) {
+                lastSpawnTime = now
+                const branchSide: Side = Math.random() > 0.5 ? 'LEFT' : 'RIGHT'
+                const id = branchIdRef.current++
+                console.log('[Timber] Spawning branch', id, 'side:', branchSide)
+                dispatchGameEvent('SPAWN_BRANCH', { branchSide, branchId: id })
+            }
 
-        const updateInterval = setInterval(() => {
-            const killedPlayers: string[] = []
-
-            const updatedBranches = branches
-                .map(b => ({ ...b, y: b.y + 8 })) // Move down
-                .filter(b => {
-                    // Check collision at y ~= 85 (hit zone)
-                    if (b.y >= 80 && b.y <= 95) {
-                        for (const p of timberPlayers) {
-                            if (p.alive && p.side === b.side) {
-                                // Player is on same side as branch - they die!
-                                killedPlayers.push(p.playerId)
+            // Update branch positions (move down)
+            if (currentBranches.length > 0) {
+                const killedPlayers: string[] = []
+                const updatedBranches = currentBranches
+                    .map(b => ({ ...b, y: b.y + 5 })) // Move down
+                    .filter(b => {
+                        // Check collision at y ~= 85 (hit zone)
+                        if (b.y >= 80 && b.y <= 95) {
+                            for (const p of currentPlayers) {
+                                if (p.alive && p.side === b.side) {
+                                    killedPlayers.push(p.playerId)
+                                }
                             }
                         }
-                    }
-                    return b.y < 100 // Remove branches that passed
-                })
+                        return b.y < 100
+                    })
 
-            // Always dispatch to keep branches moving smoothly
-            dispatchGameEvent('UPDATE_BRANCHES', { updatedBranches, killedPlayers })
+                dispatchGameEvent('UPDATE_BRANCHES', { updatedBranches, killedPlayers })
+            }
         }, 50)
 
-        return () => clearInterval(updateInterval)
-    }, [isPlaying, isLeader, winnerId, branches, timberPlayers, dispatchGameEvent])
+        return () => {
+            console.log('[Timber] Stopping game loop')
+            clearInterval(gameLoop)
+        }
+    }, [isPlaying, isLeader, winnerId, timberPlayers.length, dispatchGameEvent])
 
     // Game End Check
     useEffect(() => {
@@ -295,15 +301,19 @@ const Timber = () => {
                     {timberPlayers.map((p) => {
                         const pName = players.find(pl => pl.id === p.playerId)?.username || '?'
                         const isMe = p.playerId === currentPlayerId
+                        // Position: LEFT side = 20%, CENTER = 50%, RIGHT side = 80%
+                        const xPos = p.side === 'LEFT' ? '25%' : p.side === 'RIGHT' ? '75%' : '50%'
                         return (
                             <motion.div
                                 key={p.playerId}
+                                initial={{ left: '50%', opacity: 1 }}
                                 animate={{
-                                    x: p.side === 'LEFT' ? -60 : 60,
+                                    left: xPos,
                                     opacity: p.alive ? 1 : 0.3
                                 }}
+                                transition={{ type: 'spring', stiffness: 500, damping: 30 }}
                                 className={clsx(
-                                    "absolute bottom-[5%] left-1/2 -translate-x-1/2 text-center",
+                                    "absolute bottom-[5%] -translate-x-1/2 text-center",
                                     isMe ? "z-10" : "z-0"
                                 )}
                             >
@@ -314,7 +324,7 @@ const Timber = () => {
                                     {p.alive ? '🧍' : '💀'}
                                 </div>
                                 <div className={clsx(
-                                    "text-xs mt-1 px-2 py-0.5 rounded",
+                                    "text-xs mt-1 px-2 py-0.5 rounded whitespace-nowrap",
                                     isMe ? "bg-blue-500 text-white" : "bg-white/50 text-black"
                                 )}>
                                     {pName}
