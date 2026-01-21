@@ -67,6 +67,7 @@ const Timber = () => {
 
             if (event.type === 'SPAWN_BRANCH') {
                 const { branchSide, branchId } = event as any
+                console.log('[Timber Reducer] SPAWN_BRANCH received, id:', branchId, 'side:', branchSide, 'current branches:', branches.length)
                 const newBranch: FallingBranch = {
                     id: branchId,
                     side: branchSide,
@@ -145,21 +146,31 @@ const Timber = () => {
         }
     }, [players, isPlaying, timberPlayers.length, updateGameState])
 
+    // Track branchId with ref to avoid stale closure
+    const branchIdRef = useRef(0)
+
     // Leader spawns branches
     useEffect(() => {
         if (!isPlaying || !isLeader || winnerId) return
         if (timberPlayers.length === 0) return
 
+        console.log('[Timber] Starting branch spawn interval')
+
         const spawnInterval = setInterval(() => {
             const branchSide: Side = Math.random() > 0.5 ? 'LEFT' : 'RIGHT'
+            const id = branchIdRef.current++
+            console.log('[Timber] Spawning branch', id, 'side:', branchSide)
             dispatchGameEvent('SPAWN_BRANCH', {
                 branchSide,
-                branchId: gameState.nextBranchId || 0
+                branchId: id
             })
         }, 800) // Spawn every 800ms
 
-        return () => clearInterval(spawnInterval)
-    }, [isPlaying, isLeader, winnerId, timberPlayers.length, dispatchGameEvent, gameState.nextBranchId])
+        return () => {
+            console.log('[Timber] Clearing spawn interval')
+            clearInterval(spawnInterval)
+        }
+    }, [isPlaying, isLeader, winnerId, timberPlayers.length, dispatchGameEvent])
 
     // Leader updates branch positions and checks collisions
     useEffect(() => {
